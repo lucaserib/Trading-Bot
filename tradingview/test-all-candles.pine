@@ -1,0 +1,111 @@
+//@version=5
+strategy("Bot Test - Every Candle", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100, calc_on_every_tick=false, process_orders_on_close=true)
+
+// ============================================================================
+// CONFIGURACAO - SUBSTITUA PELOS SEUS VALORES
+// ============================================================================
+
+STRATEGY_ID = input.string("YOUR_STRATEGY_ID", "Strategy ID", group="Bot Config")
+WEBHOOK_SECRET = input.string("YOUR_WEBHOOK_SECRET", "Webhook Secret", group="Bot Config")
+SYMBOL = input.string("BTCUSDT", "Symbol", group="Bot Config")
+
+// ============================================================================
+// MODO DE TESTE
+// ============================================================================
+
+testMode = input.string("Only Sell", "Test Mode", options=["Alternating", "Only Buy", "Only Sell"], group="Test Mode")
+useLimitOrder = input.bool(true, "Use LIMIT Order (executa no preco exato)", group="Test Mode")
+onlyRealtime = input.bool(true, "Only execute in realtime (ignore historical)", group="Test Mode")
+
+// ============================================================================
+// LOGICA - IGNORA CANDLES HISTORICOS
+// ============================================================================
+
+canExecute = onlyRealtime ? (barstate.isconfirmed and barstate.isrealtime) : barstate.isconfirmed
+
+// ============================================================================
+// LOGICA DE SINAIS
+// ============================================================================
+
+isEvenBar = bar_index % 2 == 0
+
+buyCondition = false
+sellCondition = false
+
+if canExecute
+    if testMode == "Alternating"
+        buyCondition := isEvenBar
+        sellCondition := not isEvenBar
+    else if testMode == "Only Buy"
+        buyCondition := true
+        sellCondition := false
+    else if testMode == "Only Sell"
+        buyCondition := false
+        sellCondition := true
+
+// ============================================================================
+// MENSAGENS JSON PARA WEBHOOK
+// IMPORTANTE: orderType:"limit" faz o bot executar no preco exato!
+// ============================================================================
+
+orderTypeStr = useLimitOrder ? ',"orderType":"limit"' : ''
+
+buyMsg = '{"secret":"' + WEBHOOK_SECRET + '","strategyId":"' + STRATEGY_ID + '","symbol":"' + SYMBOL + '","action":"buy"' + orderTypeStr + ',"price":' + str.tostring(close) + '}'
+
+sellMsg = '{"secret":"' + WEBHOOK_SECRET + '","strategyId":"' + STRATEGY_ID + '","symbol":"' + SYMBOL + '","action":"sell"' + orderTypeStr + ',"price":' + str.tostring(close) + '}'
+
+// ============================================================================
+// EXECUCAO DA ESTRATEGIA
+// ============================================================================
+
+if buyCondition
+    strategy.entry("BUY", strategy.long, alert_message=buyMsg)
+
+if sellCondition
+    strategy.entry("SELL", strategy.short, alert_message=sellMsg)
+
+// ============================================================================
+// VISUALIZACAO
+// ============================================================================
+
+plotshape(buyCondition, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.normal)
+plotshape(sellCondition, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.normal)
+
+bgcolor(buyCondition ? color.new(color.green, 85) : sellCondition ? color.new(color.red, 85) : na)
+
+// Status no grafico
+var table statusTable = table.new(position.top_right, 1, 5, bgcolor=color.new(color.blue, 80))
+if barstate.islast
+    table.cell(statusTable, 0, 0, "BOT TEST MODE", text_color=color.white, text_size=size.normal)
+    table.cell(statusTable, 0, 1, "Mode: " + testMode, text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 0, 2, "Realtime Only: " + str.tostring(onlyRealtime), text_color=color.white, text_size=size.small)
+    table.cell(statusTable, 0, 3, "Order: " + (useLimitOrder ? "LIMIT (preco exato)" : "MARKET"), text_color=useLimitOrder ? color.lime : color.yellow, text_size=size.small)
+    table.cell(statusTable, 0, 4, "Price: " + str.tostring(close), text_color=color.white, text_size=size.small)
+
+// ============================================================================
+// INSTRUCOES - LEIA COM ATENCAO!
+// ============================================================================
+//
+// PARA EXECUTAR NO PRECO EXATO DO TRADINGVIEW:
+// >>> Habilite "Use LIMIT Order" = true (JA ESTA HABILITADO POR PADRAO!)
+//
+// Isso adiciona "orderType":"limit" no JSON, fazendo o bot criar
+// uma ordem LIMIT no Binance ao inves de ordem a mercado.
+//
+// PASSOS:
+// 1. Substitua YOUR_STRATEGY_ID pelo ID da sua estrategia
+// 2. Substitua YOUR_WEBHOOK_SECRET pelo seu webhook secret
+// 3. Verifique se SYMBOL esta correto (BTCUSDT, ETHUSDT, etc)
+// 4. Adicione ao grafico
+// 5. Crie um alerta:
+//    - Condition: "Bot Test - Every Candle"
+//    - Options: "Order fills only"
+//    - Webhook URL: SEU_BACKEND/api/webhooks/tradingview
+//    - Message: deixe VAZIO
+//
+// EXEMPLO DE JSON ENVIADO (com LIMIT habilitado):
+// {"secret":"xxx","strategyId":"xxx","symbol":"BTCUSDT","action":"sell","orderType":"limit","price":91234.56}
+//
+// Se "orderType":"limit" NAO estiver no JSON = ordem MARKET (preco de mercado)
+// Se "orderType":"limit" ESTIVER no JSON = ordem LIMIT (preco exato)
+// ============================================================================

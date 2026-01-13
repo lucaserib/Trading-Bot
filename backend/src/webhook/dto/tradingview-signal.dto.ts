@@ -1,8 +1,14 @@
-import { IsString, IsNumber, IsOptional, IsEnum, IsBoolean } from 'class-validator';
+import { IsString, IsOptional, IsEnum } from 'class-validator';
+import { Transform } from 'class-transformer';
 
 export enum SignalAction {
   BUY = 'buy',
   SELL = 'sell',
+}
+
+export enum OrderType {
+  MARKET = 'market',
+  LIMIT = 'limit',
 }
 
 export class TradingviewSignalDto {
@@ -10,33 +16,36 @@ export class TradingviewSignalDto {
   secret: string;
 
   @IsString()
-  symbol: string; // e.g., 'BTC/USDT'
+  symbol: string;
 
   @IsEnum(SignalAction)
   action: SignalAction;
 
-  @IsNumber()
+  @IsEnum(OrderType)
+  @IsOptional()
+  orderType?: OrderType;
+
+  @Transform(({ value }) => typeof value === 'string' ? parseFloat(value) : value)
   @IsOptional()
   price?: number;
 
   @IsString()
   @IsOptional()
   strategyId?: string;
-  
-  // Optional Strategy Overrides
-  @IsNumber()
+
+  @Transform(({ value }) => typeof value === 'string' ? parseFloat(value) : value)
   @IsOptional()
   stopLoss?: number;
 
-  @IsNumber()
+  @Transform(({ value }) => typeof value === 'string' ? parseFloat(value) : value)
   @IsOptional()
   takeProfit?: number;
 
-  @IsNumber()
+  @Transform(({ value }) => typeof value === 'string' ? parseFloat(value) : value)
   @IsOptional()
   quantity?: number;
 
-  @IsNumber()
+  @Transform(({ value }) => typeof value === 'string' ? parseFloat(value) : value)
   @IsOptional()
   accountPercentage?: number;
 }

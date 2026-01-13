@@ -43,10 +43,10 @@ export class Strategy {
   isTestnet: boolean;
 
   @Column({ type: 'text', nullable: true, select: false }) 
-  apiKey: string; // Will be encrypted
+  apiKey: string;
 
   @Column({ type: 'text', nullable: true, select: false })
-  apiSecret: string; // Will be encrypted
+  apiSecret: string;
 
   @Column({ type: 'int', default: 1 })
   leverage: number;
@@ -57,7 +57,6 @@ export class Strategy {
   @Column({ type: 'float', default: 0.002 })
   defaultQuantity: number;
 
-  // Risk Management
   @Column({ type: 'float', nullable: true })
   stopLossPercentage: number;
 

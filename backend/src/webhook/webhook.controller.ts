@@ -20,6 +20,9 @@ interface WebhookPayload {
   price?: number | string;
   quantity?: number;
   accountPercentage?: number;
+  orderType?: 'market' | 'limit';
+  stopLoss?: number | string;
+  takeProfit?: number | string;
 }
 
 @Controller('webhooks/tradingview')
@@ -43,8 +46,9 @@ export class WebhookController {
   @UseGuards(ThrottlerGuard)
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   async handleSignal(@Body() payload: WebhookPayload) {
+    const orderTypeLabel = payload.orderType === 'limit' ? 'LIMIT' : 'MARKET';
     this.logger.log(
-      `[WEBHOOK] ${payload.symbol} ${payload.action?.toUpperCase()} @ ${payload.price || 'MARKET'}`
+      `[WEBHOOK] ${payload.symbol} ${payload.action?.toUpperCase()} @ ${payload.price || 'MARKET'} (${orderTypeLabel})`
     );
 
     const normalizedPayload = this.normalizePayload(payload);
@@ -67,7 +71,14 @@ export class WebhookController {
       price: typeof payload.price === 'string'
         ? parseFloat(payload.price)
         : payload.price,
-      action: payload.action?.toLowerCase()
+      stopLoss: typeof payload.stopLoss === 'string'
+        ? parseFloat(payload.stopLoss)
+        : payload.stopLoss,
+      takeProfit: typeof payload.takeProfit === 'string'
+        ? parseFloat(payload.takeProfit)
+        : payload.takeProfit,
+      action: payload.action?.toLowerCase(),
+      orderType: payload.orderType?.toLowerCase()
     };
   }
 

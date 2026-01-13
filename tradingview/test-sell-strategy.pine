@@ -1,0 +1,43 @@
+// =============================================================================
+// ESTRATEGIA DE TESTE - SELL NO PROXIMO CANDLE
+// Cole este codigo no Pine Editor do TradingView
+// =============================================================================
+
+//@version=5
+strategy("Bot Test - Sell Signal", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// =============================================================================
+// CONFIGURACOES
+// =============================================================================
+
+// Ativar/Desativar sinais
+enableSell = input.bool(true, "Ativar Sinal de Venda", group="Sinais")
+
+// Condicao simples: venda quando o candle atual fechar em baixa
+sellCondition = enableSell and close < open
+
+// =============================================================================
+// EXECUCAO DA ESTRATEGIA
+// =============================================================================
+
+if sellCondition
+    strategy.entry("SELL", strategy.short)
+
+// =============================================================================
+// VISUALIZACAO
+// =============================================================================
+
+// Marca o ponto de entrada no grafico
+plotshape(sellCondition, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.normal)
+
+// Linha de preco de entrada
+bgcolor(sellCondition ? color.new(color.red, 90) : na)
+
+// =============================================================================
+// ALERTA - COPIE ESTE JSON PARA O WEBHOOK
+// =============================================================================
+
+// O alerta sera disparado automaticamente quando a condicao for verdadeira
+// Configure o alerta com a mensagem abaixo (substitua YOUR_STRATEGY_ID pelo ID real)
+
+alertcondition(sellCondition, title="Sell Alert", message='{"secret":"default_secret_123","strategyId":"YOUR_STRATEGY_ID","symbol":"BTCUSDT","action":"sell","price":{{close}}}')

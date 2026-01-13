@@ -14,11 +14,59 @@ export class TradesService {
     return this.tradesRepository.save(trade);
   }
 
-  async findAll(): Promise<Trade[]> {
-    return this.tradesRepository.find({
+  async findAll(status?: string, limit: number = 50): Promise<Trade[]> {
+    const where: any = {};
+
+    if (status && ['OPEN', 'CLOSED', 'SIMULATED', 'ERROR'].includes(status.toUpperCase())) {
+      where.status = status.toUpperCase();
+    }
+
+    const trades = await this.tradesRepository.find({
+      where,
       order: { timestamp: 'DESC' },
-      take: 50
+      take: limit
     });
+
+    return trades.map(this.normalizeTrade);
+  }
+
+  async findOpenTrades(): Promise<Trade[]> {
+    return this.tradesRepository.find({
+      where: { status: 'OPEN' },
+      order: { timestamp: 'DESC' }
+    });
+  }
+
+  async findOpenTradeBySymbolAndSide(
+    strategyId: string,
+    symbol: string,
+    side: 'BUY' | 'SELL'
+  ): Promise<Trade | null> {
+    return this.tradesRepository.findOne({
+      where: { strategyId, symbol, side, status: 'OPEN' }
+    });
+  }
+
+  async findRecentTradeBySymbol(
+    strategyId: string,
+    symbol: string,
+    secondsAgo: number = 30
+  ): Promise<Trade | null> {
+    const cutoffTime = new Date(Date.now() - secondsAgo * 1000);
+
+    return this.tradesRepository
+      .createQueryBuilder('trade')
+      .where('trade.strategyId = :strategyId', { strategyId })
+      .andWhere('trade.symbol = :symbol', { symbol })
+      .andWhere('trade.status = :status', { status: 'OPEN' })
+      .andWhere('trade.timestamp > :cutoffTime', { cutoffTime })
+      .orderBy('trade.timestamp', 'DESC')
+      .getOne();
+  }
+
+  async updateTrade(id: string, updates: Partial<Trade>): Promise<Trade | null> {
+    await this.tradesRepository.update(id, updates);
+    return this.tradesRepository.findOneBy({ id });
   }
 
   async getStats() {
@@ -54,7 +102,8 @@ export class TradesService {
       totalTrades: closedTrades.length,
       wins,
       losses,
-      recentSignals: allTrades.map(this.normalizeTrade)
+      recentSignals: allTrades.map(this.normalizeTrade),
+      openPositions: openTrades.map(this.normalizeTrade)
     };
   }
 
@@ -94,6 +143,8 @@ export class TradesService {
     ...trade,
     pnl: trade.pnl ? this.parsePnL(trade.pnl) : null,
     entryPrice: this.parsePrice(trade.entryPrice),
-    quantity: this.parsePrice(trade.quantity)
+    exitPrice: trade.exitPrice ? this.parsePrice(trade.exitPrice) : null,
+    quantity: this.parsePrice(trade.quantity),
+    binancePositionAmt: trade.binancePositionAmt ? this.parsePrice(trade.binancePositionAmt) : null
   });
 }

@@ -11,6 +11,7 @@ import { TradesModule } from './trades/trades.module';
 import { PositionSyncModule } from './position-sync/position-sync.module';
 import { StopLossModule } from './stop-loss/stop-loss.module';
 import { TakeProfitModule } from './take-profit/take-profit.module';
+import { WebSocketModule } from './websocket/websocket.module';
 
 @Module({
   imports: [
@@ -29,7 +30,7 @@ import { TakeProfitModule } from './take-profit/take-profit.module';
         password: configService.get<string>('DB_PASSWORD', 'admin123'),
         database: configService.get<string>('DB_NAME', 'trading_bot'),
         autoLoadEntities: true,
-        synchronize: true, 
+        synchronize: true,
       }),
       inject: [ConfigService],
     }),
@@ -39,7 +40,8 @@ import { TakeProfitModule } from './take-profit/take-profit.module';
     TradesModule,
     PositionSyncModule,
     StopLossModule,
-    TakeProfitModule
+    TakeProfitModule,
+    WebSocketModule
   ],
   controllers: [AppController],
   providers: [AppService],

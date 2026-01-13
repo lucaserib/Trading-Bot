@@ -17,8 +17,51 @@ export class StrategiesService {
 
   findOne(id: string): Promise<Strategy | null> {
     return this.strategiesRepository.findOne({
-        where: { id },
-        select: ['id', 'name', 'asset', 'direction', 'isActive', 'isDryRun', 'isTestnet', 'leverage', 'marginMode', 'stopLossPercentage', 'apiKey', 'apiSecret'] 
+      where: { id },
+      select: [
+        'id',
+        'name',
+        'asset',
+        'exchange',
+        'direction',
+        'isActive',
+        'isDryRun',
+        'isTestnet',
+        'leverage',
+        'marginMode',
+        'defaultQuantity',
+        'stopLossPercentage',
+        'takeProfitPercentage1',
+        'takeProfitPercentage2',
+        'takeProfitPercentage3',
+        'moveSLToBreakeven',
+        'apiKey',
+        'apiSecret'
+      ]
+    });
+  }
+
+  findOnePublic(id: string): Promise<Strategy | null> {
+    return this.strategiesRepository.findOne({
+      where: { id },
+      select: [
+        'id',
+        'name',
+        'asset',
+        'exchange',
+        'direction',
+        'isActive',
+        'isDryRun',
+        'isTestnet',
+        'leverage',
+        'marginMode',
+        'defaultQuantity',
+        'stopLossPercentage',
+        'takeProfitPercentage1',
+        'takeProfitPercentage2',
+        'takeProfitPercentage3',
+        'moveSLToBreakeven'
+      ]
     });
   }
 

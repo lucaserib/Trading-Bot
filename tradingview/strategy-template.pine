@@ -1,0 +1,97 @@
+//@version=5
+strategy("Trading Bot Strategy Template", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=100)
+
+// ============================================================================
+// CONFIGURATION
+// Replace YOUR_STRATEGY_ID with the actual strategy ID from your bot
+// Replace YOUR_WEBHOOK_SECRET with your webhook secret
+// ============================================================================
+
+STRATEGY_ID = "YOUR_STRATEGY_ID"
+WEBHOOK_SECRET = "YOUR_WEBHOOK_SECRET"
+SYMBOL = "BTCUSDT"
+
+// ============================================================================
+// INPUTS
+// ============================================================================
+
+enableLong = input.bool(true, "Enable Long Signals", group="Signals")
+enableShort = input.bool(true, "Enable Short Signals", group="Signals")
+useLimitOrders = input.bool(false, "Use LIMIT Orders (instead of MARKET)", group="Order Type")
+
+// Strategy Parameters
+fastLength = input.int(14, "Fast MA Length", minval=1, group="Strategy")
+slowLength = input.int(28, "Slow MA Length", minval=1, group="Strategy")
+
+// ============================================================================
+// STRATEGY LOGIC
+// Replace with your own trading logic
+// ============================================================================
+
+fastMA = ta.sma(close, fastLength)
+slowMA = ta.sma(close, slowLength)
+
+longCondition = enableLong and ta.crossover(fastMA, slowMA)
+shortCondition = enableShort and ta.crossunder(fastMA, slowMA)
+
+// ============================================================================
+// ALERT MESSAGES
+// These JSON messages are sent to your webhook
+// ============================================================================
+
+// Market Order Messages
+buyMarketMsg = '{"secret":"' + WEBHOOK_SECRET + '","strategyId":"' + STRATEGY_ID + '","symbol":"' + SYMBOL + '","action":"buy","price":' + str.tostring(close) + '}'
+
+sellMarketMsg = '{"secret":"' + WEBHOOK_SECRET + '","strategyId":"' + STRATEGY_ID + '","symbol":"' + SYMBOL + '","action":"sell","price":' + str.tostring(close) + '}'
+
+// Limit Order Messages (executes at the exact price from TradingView)
+buyLimitMsg = '{"secret":"' + WEBHOOK_SECRET + '","strategyId":"' + STRATEGY_ID + '","symbol":"' + SYMBOL + '","action":"buy","orderType":"limit","price":' + str.tostring(close) + '}'
+
+sellLimitMsg = '{"secret":"' + WEBHOOK_SECRET + '","strategyId":"' + STRATEGY_ID + '","symbol":"' + SYMBOL + '","action":"sell","orderType":"limit","price":' + str.tostring(close) + '}'
+
+// ============================================================================
+// STRATEGY EXECUTION
+// ============================================================================
+
+if longCondition
+    if useLimitOrders
+        strategy.entry("Long", strategy.long, alert_message=buyLimitMsg)
+    else
+        strategy.entry("Long", strategy.long, alert_message=buyMarketMsg)
+
+if shortCondition
+    if useLimitOrders
+        strategy.entry("Short", strategy.short, alert_message=sellLimitMsg)
+    else
+        strategy.entry("Short", strategy.short, alert_message=sellMarketMsg)
+
+// ============================================================================
+// VISUALIZATION
+// ============================================================================
+
+plot(fastMA, "Fast MA", color=color.blue, linewidth=2)
+plot(slowMA, "Slow MA", color=color.orange, linewidth=2)
+
+plotshape(longCondition, title="Buy Signal", location=location.belowbar, color=color.green, style=shape.triangleup, size=size.small)
+plotshape(shortCondition, title="Sell Signal", location=location.abovebar, color=color.red, style=shape.triangledown, size=size.small)
+
+bgcolor(longCondition ? color.new(color.green, 90) : na)
+bgcolor(shortCondition ? color.new(color.red, 90) : na)
+
+// ============================================================================
+// INSTRUCTIONS
+// ============================================================================
+// 1. Replace YOUR_STRATEGY_ID with your actual strategy ID from the bot
+// 2. Replace YOUR_WEBHOOK_SECRET with your webhook secret
+// 3. Update SYMBOL to match your trading pair
+// 4. Add this strategy to your TradingView chart
+// 5. Create an alert with the following settings:
+//    - Condition: This strategy
+//    - Alert actions: Webhook URL (your backend URL + /webhooks/tradingview)
+//    - Message: Leave empty - the strategy will use alert_message
+//
+// The bot will:
+// - Execute the order at the exact TradingView price (LIMIT) or market price (MARKET)
+// - Configure leverage and margin mode before each trade
+// - Create Stop Loss and Take Profit orders based on strategy settings
+// ============================================================================
