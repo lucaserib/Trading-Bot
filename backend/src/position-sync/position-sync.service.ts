@@ -6,6 +6,7 @@ import { Trade } from '../strategies/trade.entity';
 import { Strategy, Exchange } from '../strategies/strategy.entity';
 import { StrategiesService } from '../strategies/strategies.service';
 import { ExchangeService } from '../exchange/exchange.service';
+import { BybitClientService, BybitPosition } from '../exchange/bybit-client.service';
 import { TradesService } from '../trades/trades.service';
 import { EncryptionUtil } from '../utils/encryption.util';
 import axios from 'axios';
@@ -20,6 +21,15 @@ interface BinancePosition {
   liquidationPrice: string;
   leverage: string;
   positionSide: 'LONG' | 'SHORT' | 'BOTH';
+}
+
+interface NormalizedPosition {
+  symbol: string;
+  side: 'BUY' | 'SELL';
+  size: number;
+  entryPrice: number;
+  unrealizedPnl: number;
+  leverage: number;
 }
 
 @Injectable()
@@ -37,6 +47,7 @@ export class PositionSyncService {
     private readonly strategiesRepository: Repository<Strategy>,
     private readonly strategiesService: StrategiesService,
     private readonly exchangeService: ExchangeService,
+    private readonly bybitClient: BybitClientService,
     private readonly tradesService: TradesService,
   ) {}
 
@@ -102,106 +113,85 @@ export class PositionSyncService {
 
   private async syncStrategyPositions(strategy: Strategy): Promise<{ synced: number; closed: number; imported: number; consolidated: number }> {
     const exchange = strategy.exchange || Exchange.BINANCE;
-
-    if (exchange !== Exchange.BINANCE) {
-      return { synced: 0, closed: 0, imported: 0, consolidated: 0 };
-    }
-
     const { apiKey, apiSecret } = await this.decryptCredentials(strategy);
 
-    const binancePositions = await this.fetchBinancePositions(
-      apiKey,
-      apiSecret,
-      strategy.isTestnet
-    );
+    let positions: NormalizedPosition[];
 
-    const openPositions = binancePositions.filter(p => parseFloat(p.positionAmt) !== 0);
+    if (exchange === Exchange.BYBIT) {
+      positions = await this.fetchBybitPositions(apiKey, apiSecret, strategy.isTestnet);
+    } else {
+      positions = await this.fetchBinancePositions(apiKey, apiSecret, strategy.isTestnet);
+    }
+
+    const openPositions = positions.filter(p => p.size !== 0);
 
     let synced = 0;
     let closed = 0;
     let imported = 0;
     let consolidated = 0;
 
-    // Process each Binance position with FRESH queries to prevent race conditions
-    for (const binancePos of openPositions) {
-      const posAmt = parseFloat(binancePos.positionAmt);
-      const posSide: 'BUY' | 'SELL' = posAmt > 0 ? 'BUY' : 'SELL';
-
-      // ALWAYS do a fresh query - never rely on cached/stale data
+    for (const position of openPositions) {
       const existingTrades = await this.tradesRepository.find({
         where: {
           strategyId: strategy.id,
-          symbol: binancePos.symbol,
-          side: posSide,
+          symbol: position.symbol,
+          side: position.side,
           status: 'OPEN'
         },
         order: { timestamp: 'ASC' }
       });
 
-      this.logger.debug(`[SYNC DEBUG] ${binancePos.symbol} (${posSide}) - strategyId: ${strategy.id} - Found ${existingTrades.length} existing trades`);
+      this.logger.debug(`[SYNC DEBUG] ${position.symbol} (${position.side}) - strategyId: ${strategy.id} - Found ${existingTrades.length} existing trades`);
 
       if (existingTrades.length === 0) {
-        // No local trade for this position - DO NOT auto-import
-        // Only trades created by webhooks should be tracked
-        // This prevents duplicate imports when multiple strategies share the same Binance account
-        this.logger.debug(`[SYNC] No local trade for ${binancePos.symbol} (${posSide}) - skipping (not auto-importing)`);
+        this.logger.debug(`[SYNC] No local trade for ${position.symbol} (${position.side}) - skipping (not auto-importing)`);
       } else if (existingTrades.length === 1) {
-        // Single trade - update with Binance data
-        await this.updateTradeFromBinance(existingTrades[0], binancePos);
+        await this.updateTradeFromPosition(existingTrades[0], position);
         synced++;
       } else {
-        // Multiple trades - consolidate into one
-        await this.consolidateTrades(existingTrades, binancePos, apiKey, apiSecret, strategy.isTestnet);
+        await this.consolidateTrades(existingTrades, position, exchange, apiKey, apiSecret, strategy.isTestnet);
         consolidated += existingTrades.length - 1;
         synced++;
-        this.logger.log(`[SYNC] Consolidated ${existingTrades.length} trades into 1 for ${binancePos.symbol}`);
+        this.logger.log(`[SYNC] Consolidated ${existingTrades.length} trades into 1 for ${position.symbol}`);
       }
     }
 
-    // Additional check: consolidate any remaining duplicates
-    // This handles race conditions where multiple trades were created for the same position
-    for (const binancePos of openPositions) {
-      const posAmt = parseFloat(binancePos.positionAmt);
-      const posSide: 'BUY' | 'SELL' = posAmt > 0 ? 'BUY' : 'SELL';
-
+    for (const position of openPositions) {
       const duplicateCheck = await this.tradesRepository.find({
         where: {
           strategyId: strategy.id,
-          symbol: binancePos.symbol,
-          side: posSide,
+          symbol: position.symbol,
+          side: position.side,
           status: 'OPEN'
         },
         order: { timestamp: 'ASC' }
       });
 
       if (duplicateCheck.length > 1) {
-        this.logger.warn(`[SYNC] Found ${duplicateCheck.length} duplicate trades for ${binancePos.symbol} (${posSide}), consolidating...`);
-        await this.consolidateTrades(duplicateCheck, binancePos, apiKey, apiSecret, strategy.isTestnet);
+        this.logger.warn(`[SYNC] Found ${duplicateCheck.length} duplicate trades for ${position.symbol} (${position.side}), consolidating...`);
+        await this.consolidateTrades(duplicateCheck, position, exchange, apiKey, apiSecret, strategy.isTestnet);
         consolidated += duplicateCheck.length - 1;
-        this.logger.log(`[SYNC] Consolidated ${duplicateCheck.length} trades into 1 for ${binancePos.symbol}`);
+        this.logger.log(`[SYNC] Consolidated ${duplicateCheck.length} trades into 1 for ${position.symbol}`);
       }
     }
 
-    // Close trades that no longer exist on Binance
     const allLocalOpenTrades = await this.tradesRepository.find({
       where: { strategyId: strategy.id, status: 'OPEN' }
     });
 
-    this.logger.debug(`[SYNC] Found ${allLocalOpenTrades.length} local open trades to check against ${openPositions.length} Binance positions`);
+    this.logger.debug(`[SYNC] Found ${allLocalOpenTrades.length} local open trades to check against ${openPositions.length} positions`);
 
     for (const trade of allLocalOpenTrades) {
-      const binancePos = openPositions.find(p => {
-        const posAmt = parseFloat(p.positionAmt);
-        const posSide = posAmt > 0 ? 'BUY' : 'SELL';
-        return p.symbol === trade.symbol && posSide === trade.side;
-      });
+      const matchingPosition = openPositions.find(p =>
+        p.symbol === trade.symbol && p.side === trade.side
+      );
 
-      if (!binancePos) {
-        // Before closing, check if this trade has a pending LIMIT order on Binance
+      if (!matchingPosition) {
         if (trade.type === 'LIMIT' && trade.exchangeOrderId) {
           const orderStatus = await this.checkOrderStatus(
             trade.exchangeOrderId,
             trade.symbol,
+            exchange,
             apiKey,
             apiSecret,
             strategy.isTestnet
@@ -212,31 +202,98 @@ export class PositionSyncService {
             continue;
           }
 
-          // If order was FILLED but no position exists, the position was closed externally
-          // We should close the trade and retrieve the actual exit price
-          if (orderStatus === 'FILLED') {
+          if (orderStatus === 'FILLED' || orderStatus === 'Filled') {
             this.logger.log(`[SYNC] Trade ${trade.id} order FILLED but no position - position was closed externally`);
-            // Don't skip - fall through to close the trade
           }
         }
 
-        await this.closeTradeAsManual(trade, apiKey, apiSecret, strategy.isTestnet);
+        await this.closeTradeAsManual(trade, exchange, apiKey, apiSecret, strategy.isTestnet);
         closed++;
-        this.logger.log(`[SYNC] Closed trade ${trade.id} for ${trade.symbol} - no longer exists on Binance`);
+        this.logger.log(`[SYNC] Closed trade ${trade.id} for ${trade.symbol} - no longer exists on exchange`);
       }
     }
 
     return { synced, closed, imported, consolidated };
   }
 
+  private async fetchBinancePositions(
+    apiKey: string,
+    apiSecret: string,
+    isTestnet: boolean
+  ): Promise<NormalizedPosition[]> {
+    const baseUrl = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
+    const timestamp = Date.now();
+    const queryString = `timestamp=${timestamp}`;
+    const signature = crypto.createHmac('sha256', apiSecret).update(queryString).digest('hex');
+
+    try {
+      const response = await axios.get(
+        `${baseUrl}/fapi/v2/positionRisk?${queryString}&signature=${signature}`,
+        {
+          headers: { 'X-MBX-APIKEY': apiKey }
+        }
+      );
+
+      return (response.data as BinancePosition[]).map(pos => {
+        const posAmt = parseFloat(pos.positionAmt);
+        return {
+          symbol: pos.symbol,
+          side: posAmt > 0 ? 'BUY' : 'SELL' as 'BUY' | 'SELL',
+          size: Math.abs(posAmt),
+          entryPrice: parseFloat(pos.entryPrice),
+          unrealizedPnl: parseFloat(pos.unRealizedProfit),
+          leverage: parseFloat(pos.leverage),
+        };
+      });
+    } catch (error) {
+      this.logger.error(`Failed to fetch Binance positions: ${error.message}`);
+      throw error;
+    }
+  }
+
+  private async fetchBybitPositions(
+    apiKey: string,
+    apiSecret: string,
+    isTestnet: boolean
+  ): Promise<NormalizedPosition[]> {
+    try {
+      const positions = await this.bybitClient.getPositions(apiKey, apiSecret, isTestnet);
+
+      return positions
+        .filter(pos => pos.side !== 'None' && parseFloat(pos.size) !== 0)
+        .map(pos => ({
+          symbol: pos.symbol,
+          side: pos.side === 'Buy' ? 'BUY' : 'SELL' as 'BUY' | 'SELL',
+          size: parseFloat(pos.size),
+          entryPrice: parseFloat(pos.avgPrice),
+          unrealizedPnl: parseFloat(pos.unrealisedPnl),
+          leverage: parseFloat(pos.leverage),
+        }));
+    } catch (error) {
+      this.logger.error(`Failed to fetch Bybit positions: ${error.message}`);
+      throw error;
+    }
+  }
+
   private async checkOrderStatus(
     orderId: string,
     symbol: string,
+    exchange: Exchange,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean
   ): Promise<string | null> {
     try {
+      if (exchange === Exchange.BYBIT) {
+        let orderInfo = await this.bybitClient.getOrderInfo(apiKey, apiSecret, isTestnet, symbol, orderId);
+
+        if (!orderInfo) {
+          orderInfo = await this.bybitClient.getOrderHistory(apiKey, apiSecret, isTestnet, symbol, orderId);
+        }
+
+        return orderInfo?.orderStatus || null;
+      }
+
       const baseUrl = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&orderId=${orderId}&timestamp=${timestamp}`;
@@ -254,23 +311,10 @@ export class PositionSyncService {
     }
   }
 
-  private groupTradesBySymbolAndSide(trades: Trade[]): Map<string, Trade[]> {
-    const groups = new Map<string, Trade[]>();
-
-    for (const trade of trades) {
-      const key = `${trade.symbol}|${trade.side}`;
-      if (!groups.has(key)) {
-        groups.set(key, []);
-      }
-      groups.get(key)!.push(trade);
-    }
-
-    return groups;
-  }
-
   private async consolidateTrades(
     trades: Trade[],
-    binancePos: BinancePosition,
+    position: NormalizedPosition,
+    exchange: Exchange,
     apiKey?: string,
     apiSecret?: string,
     isTestnet?: boolean
@@ -280,21 +324,16 @@ export class PositionSyncService {
     const primaryTrade = trades[0];
     const duplicateTrades = trades.slice(1);
 
-    const binanceQty = Math.abs(parseFloat(binancePos.positionAmt));
-    const binanceEntryPrice = parseFloat(binancePos.entryPrice);
-    const unrealizedPnL = parseFloat(binancePos.unRealizedProfit);
-
-    primaryTrade.quantity = binanceQty as any;
-    primaryTrade.entryPrice = binanceEntryPrice as any;
-    primaryTrade.pnl = unrealizedPnL as any;
-    primaryTrade.binancePositionAmt = binanceQty as any;
+    primaryTrade.quantity = position.size as any;
+    primaryTrade.entryPrice = position.entryPrice as any;
+    primaryTrade.pnl = position.unrealizedPnl as any;
+    primaryTrade.binancePositionAmt = position.size as any;
 
     await this.tradesRepository.save(primaryTrade);
 
     for (const trade of duplicateTrades) {
-      // Cancel SL/TP orders for duplicate trades
       if (apiKey && apiSecret && isTestnet !== undefined) {
-        await this.cancelOpenOrders(trade, apiKey, apiSecret, isTestnet);
+        await this.cancelOpenOrders(trade, exchange, apiKey, apiSecret, isTestnet);
       }
 
       trade.status = 'CLOSED';
@@ -311,42 +350,23 @@ export class PositionSyncService {
     }
 
     this.logger.log(
-      `[CONSOLIDATE] ${primaryTrade.symbol} | Binance Qty: ${binanceQty} | Entry: ${binanceEntryPrice} | P&L: ${unrealizedPnL.toFixed(4)}`
+      `[CONSOLIDATE] ${primaryTrade.symbol} | Qty: ${position.size} | Entry: ${position.entryPrice} | P&L: ${position.unrealizedPnl.toFixed(4)}`
     );
 
     return primaryTrade;
   }
 
-  private async fetchBinancePositions(
-    apiKey: string,
-    apiSecret: string,
-    isTestnet: boolean
-  ): Promise<BinancePosition[]> {
-    const baseUrl = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
-    const timestamp = Date.now();
-    const queryString = `timestamp=${timestamp}`;
-    const signature = crypto.createHmac('sha256', apiSecret).update(queryString).digest('hex');
-
-    try {
-      const response = await axios.get(
-        `${baseUrl}/fapi/v2/positionRisk?${queryString}&signature=${signature}`,
-        {
-          headers: { 'X-MBX-APIKEY': apiKey }
-        }
-      );
-      return response.data;
-    } catch (error) {
-      this.logger.error(`Failed to fetch Binance positions: ${error.message}`);
-      throw error;
-    }
-  }
-
   private async getLastTradePrice(
     symbol: string,
+    exchange: Exchange,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean
   ): Promise<number | null> {
+    if (exchange === Exchange.BYBIT) {
+      return await this.bybitClient.getLastTradePrice(apiKey, apiSecret, isTestnet, symbol);
+    }
+
     const baseUrl = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
     const timestamp = Date.now();
     const queryString = `symbol=${symbol}&limit=1&timestamp=${timestamp}`;
@@ -372,15 +392,15 @@ export class PositionSyncService {
 
   private async closeTradeAsManual(
     trade: Trade,
+    exchange: Exchange,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean
   ): Promise<void> {
-    // Cancel any open SL/TP orders on Binance before closing
-    await this.cancelOpenOrders(trade, apiKey, apiSecret, isTestnet);
+    await this.cancelOpenOrders(trade, exchange, apiKey, apiSecret, isTestnet);
 
-    const exitPrice = await this.getLastTradePrice(trade.symbol, apiKey, apiSecret, isTestnet);
-    const currentPrice = exitPrice || await this.getCurrentPrice(trade.symbol, isTestnet);
+    const exitPrice = await this.getLastTradePrice(trade.symbol, exchange, apiKey, apiSecret, isTestnet);
+    const currentPrice = exitPrice || await this.getCurrentPrice(trade.symbol, exchange, isTestnet);
 
     const entryPrice = parseFloat(trade.entryPrice as any);
     const quantity = parseFloat(trade.quantity as any);
@@ -406,13 +426,23 @@ export class PositionSyncService {
 
   private async cancelOpenOrders(
     trade: Trade,
+    exchange: Exchange,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean
   ): Promise<void> {
+    if (exchange === Exchange.BYBIT) {
+      if (trade.stopLossOrderId && !trade.stopLossOrderId.startsWith('BYBIT_')) {
+        await this.bybitClient.cancelOrder(apiKey, apiSecret, isTestnet, trade.symbol, trade.stopLossOrderId);
+      }
+      if (trade.takeProfitOrderId && !trade.takeProfitOrderId.startsWith('BYBIT_')) {
+        await this.bybitClient.cancelOrder(apiKey, apiSecret, isTestnet, trade.symbol, trade.takeProfitOrderId);
+      }
+      return;
+    }
+
     const baseUrl = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
 
-    // Cancel Stop Loss order if exists
     if (trade.stopLossOrderId) {
       try {
         const timestamp = Date.now();
@@ -425,14 +455,12 @@ export class PositionSyncService {
         );
         this.logger.log(`[CANCEL] Cancelled SL order ${trade.stopLossOrderId} for ${trade.symbol}`);
       } catch (error: any) {
-        // Order may already be filled, cancelled, or expired - that's OK
         if (error.response?.data?.code !== -2011) {
           this.logger.debug(`[CANCEL] Could not cancel SL order: ${error.response?.data?.msg || error.message}`);
         }
       }
     }
 
-    // Cancel Take Profit order if exists
     if (trade.takeProfitOrderId) {
       try {
         const timestamp = Date.now();
@@ -445,7 +473,6 @@ export class PositionSyncService {
         );
         this.logger.log(`[CANCEL] Cancelled TP order ${trade.takeProfitOrderId} for ${trade.symbol}`);
       } catch (error: any) {
-        // Order may already be filled, cancelled, or expired - that's OK
         if (error.response?.data?.code !== -2011) {
           this.logger.debug(`[CANCEL] Could not cancel TP order: ${error.response?.data?.msg || error.message}`);
         }
@@ -453,46 +480,24 @@ export class PositionSyncService {
     }
   }
 
-  private async updateTradeFromBinance(trade: Trade, binancePos: BinancePosition): Promise<void> {
-    const unrealizedPnL = parseFloat(binancePos.unRealizedProfit);
-    const positionAmt = Math.abs(parseFloat(binancePos.positionAmt));
-    const binanceEntryPrice = parseFloat(binancePos.entryPrice);
-
-    trade.pnl = unrealizedPnL as any;
-    trade.binancePositionAmt = positionAmt as any;
-    trade.quantity = positionAmt as any;
-    trade.entryPrice = binanceEntryPrice as any;
+  private async updateTradeFromPosition(trade: Trade, position: NormalizedPosition): Promise<void> {
+    trade.pnl = position.unrealizedPnl as any;
+    trade.binancePositionAmt = position.size as any;
+    trade.quantity = position.size as any;
+    trade.entryPrice = position.entryPrice as any;
 
     await this.tradesRepository.save(trade);
 
     this.logger.debug(
-      `[SYNC] ${trade.symbol} | Binance P&L: ${unrealizedPnL.toFixed(4)} | Qty: ${positionAmt} | Entry: ${binanceEntryPrice}`
+      `[SYNC] ${trade.symbol} | P&L: ${position.unrealizedPnl.toFixed(4)} | Qty: ${position.size} | Entry: ${position.entryPrice}`
     );
   }
 
-  private async importPositionFromBinance(
-    strategyId: string,
-    binancePos: BinancePosition
-  ): Promise<void> {
-    const positionAmt = parseFloat(binancePos.positionAmt);
-    const side: 'BUY' | 'SELL' = positionAmt > 0 ? 'BUY' : 'SELL';
+  private async getCurrentPrice(symbol: string, exchange: Exchange, isTestnet: boolean): Promise<number> {
+    if (exchange === Exchange.BYBIT) {
+      return await this.bybitClient.getCurrentPrice(isTestnet, symbol);
+    }
 
-    const trade: Partial<Trade> = {
-      strategyId,
-      symbol: binancePos.symbol,
-      side,
-      type: 'MARKET',
-      entryPrice: parseFloat(binancePos.entryPrice) as any,
-      quantity: Math.abs(positionAmt) as any,
-      pnl: parseFloat(binancePos.unRealizedProfit) as any,
-      status: 'OPEN',
-      binancePositionAmt: Math.abs(positionAmt) as any,
-    };
-
-    await this.tradesRepository.save(trade);
-  }
-
-  private async getCurrentPrice(symbol: string, isTestnet: boolean): Promise<number> {
     const baseUrl = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
 
     try {

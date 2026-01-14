@@ -5,6 +5,7 @@ import { Repository } from 'typeorm';
 import { Trade, CloseReason } from '../strategies/trade.entity';
 import { StrategiesService } from '../strategies/strategies.service';
 import { ExchangeService } from '../exchange/exchange.service';
+import { BybitClientService } from '../exchange/bybit-client.service';
 import { Exchange } from '../strategies/strategy.entity';
 import { EncryptionUtil } from '../utils/encryption.util';
 import axios from 'axios';
@@ -21,6 +22,7 @@ export class TakeProfitService {
     private tradesRepository: Repository<Trade>,
     private strategiesService: StrategiesService,
     private exchangeService: ExchangeService,
+    private bybitClient: BybitClientService,
   ) {}
 
   @Cron(CronExpression.EVERY_5_SECONDS)
@@ -42,35 +44,48 @@ export class TakeProfitService {
     const strategy = await this.strategiesService.findOne(trade.strategyId);
     if (!strategy || strategy.isDryRun) return;
 
+    const exchange = strategy.exchange || Exchange.BINANCE;
     const apiKey = (await EncryptionUtil.decrypt(strategy.apiKey)).trim();
     const apiSecret = (await EncryptionUtil.decrypt(strategy.apiSecret)).trim();
 
-    // Only check order status if we have a valid takeProfitOrderId
     if (trade.takeProfitOrderId && trade.takeProfitOrderId.trim() !== '') {
+      if (trade.takeProfitOrderId.startsWith('BYBIT_TRADING_STOP')) {
+        const positions = await this.bybitClient.getPositions(apiKey, apiSecret, strategy.isTestnet, trade.symbol);
+        const position = positions.find(p =>
+          p.symbol === trade.symbol &&
+          ((trade.side === 'BUY' && p.side === 'Buy') || (trade.side === 'SELL' && p.side === 'Sell'))
+        );
+
+        if (!position || parseFloat(position.size) === 0) {
+          this.logger.log(`[TAKE PROFIT EXECUTED] ${trade.symbol} - Position closed on Bybit`);
+          await this.markTradeAsClosed(trade, 'TAKE_PROFIT', exchange, apiKey, apiSecret, strategy.isTestnet);
+          return;
+        }
+        return;
+      }
+
       const orderStatus = await this.checkOrderStatus(
         trade.takeProfitOrderId,
         trade.symbol,
+        exchange,
         apiKey,
         apiSecret,
         strategy.isTestnet
       );
 
-      if (orderStatus === 'FILLED') {
-        this.logger.log(`[TAKE PROFIT EXECUTED] ${trade.symbol} - Order was filled on Binance`);
-        await this.markTradeAsClosed(trade, 'TAKE_PROFIT', apiKey, apiSecret, strategy.isTestnet);
+      if (orderStatus === 'FILLED' || orderStatus === 'Filled') {
+        this.logger.log(`[TAKE PROFIT EXECUTED] ${trade.symbol} - Order was filled`);
+        await this.markTradeAsClosed(trade, 'TAKE_PROFIT', exchange, apiKey, apiSecret, strategy.isTestnet);
         return;
-      } else if (orderStatus === 'CANCELED' || orderStatus === 'EXPIRED') {
+      } else if (orderStatus === 'CANCELED' || orderStatus === 'EXPIRED' || orderStatus === 'Cancelled' || orderStatus === 'Deactivated') {
         this.logger.warn(`[TAKE PROFIT] Order ${trade.takeProfitOrderId} was ${orderStatus}, falling back to manual monitoring`);
         trade.takeProfitOrderId = null;
         await this.tradesRepository.save(trade);
-      } else if (orderStatus === 'NEW') {
-        // Order is still active, nothing to do
+      } else if (orderStatus === 'NEW' || orderStatus === 'New') {
         return;
       }
-      // If orderStatus is null (API error), fall through to manual monitoring
     }
 
-    // Manual monitoring fallback
     const currentPrice = await this.getCurrentPrice(trade, strategy);
     if (!currentPrice) return;
 
@@ -78,7 +93,6 @@ export class TakeProfitService {
     const tp2 = this.calculateTakeProfit(trade, strategy, 2);
     const tp3 = this.calculateTakeProfit(trade, strategy, 3);
 
-    // If no take profit levels configured, skip
     if (!tp1 && !tp2 && !tp3) return;
 
     const profitPercent = this.calculateProfitPercent(trade, currentPrice);
@@ -98,11 +112,22 @@ export class TakeProfitService {
   private async checkOrderStatus(
     orderId: string,
     symbol: string,
+    exchange: Exchange,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean
   ): Promise<string | null> {
     try {
+      if (exchange === Exchange.BYBIT) {
+        let orderInfo = await this.bybitClient.getOrderInfo(apiKey, apiSecret, isTestnet, symbol, orderId);
+
+        if (!orderInfo) {
+          orderInfo = await this.bybitClient.getOrderHistory(apiKey, apiSecret, isTestnet, symbol, orderId);
+        }
+
+        return orderInfo?.orderStatus || null;
+      }
+
       const baseUrl = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&orderId=${orderId}&timestamp=${timestamp}`;
@@ -123,12 +148,13 @@ export class TakeProfitService {
   private async markTradeAsClosed(
     trade: Trade,
     reason: CloseReason,
+    exchange: Exchange,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean
   ): Promise<void> {
-    const exitPrice = await this.getLastTradePrice(trade.symbol, apiKey, apiSecret, isTestnet);
-    const currentPrice = exitPrice || await this.getCurrentPrice(trade, { isTestnet } as any);
+    const exitPrice = await this.getLastTradePrice(trade.symbol, exchange, apiKey, apiSecret, isTestnet);
+    const currentPrice = exitPrice || await this.getCurrentPrice(trade, { exchange, isTestnet } as any);
 
     const pnl = this.calculatePnL(trade, currentPrice, 1.0);
 
@@ -146,11 +172,16 @@ export class TakeProfitService {
 
   private async getLastTradePrice(
     symbol: string,
+    exchange: Exchange,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean
   ): Promise<number | null> {
     try {
+      if (exchange === Exchange.BYBIT) {
+        return await this.bybitClient.getLastTradePrice(apiKey, apiSecret, isTestnet, symbol);
+      }
+
       const baseUrl = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&limit=1&timestamp=${timestamp}`;
@@ -211,6 +242,10 @@ export class TakeProfitService {
     try {
       const exchange = strategy.exchange || Exchange.BINANCE;
 
+      if (exchange === Exchange.BYBIT) {
+        return await this.bybitClient.getCurrentPrice(strategy.isTestnet, trade.symbol);
+      }
+
       if (strategy.isTestnet && exchange === Exchange.BINANCE) {
         const response = await axios.get(
           `${this.BINANCE_TESTNET_URL}/fapi/v1/ticker/price?symbol=${trade.symbol}`
@@ -252,7 +287,21 @@ export class TakeProfitService {
       const quantity = parseFloat(trade.quantity as any);
       const closeQuantity = quantity * closePercent;
 
-      if (strategy.isTestnet && exchange === Exchange.BINANCE) {
+      if (exchange === Exchange.BYBIT) {
+        const bybitSide = closeSide === 'BUY' ? 'Buy' : 'Sell';
+        await this.bybitClient.createOrder(
+          apiKey,
+          apiSecret,
+          strategy.isTestnet,
+          {
+            symbol: trade.symbol,
+            side: bybitSide,
+            orderType: 'Market',
+            qty: closeQuantity.toFixed(3),
+          }
+        );
+        this.logger.log(`[BYBIT] Closed ${(closePercent * 100).toFixed(0)}% of ${trade.symbol} via ${reason} at ${exitPrice}`);
+      } else if (strategy.isTestnet && exchange === Exchange.BINANCE) {
         const baseURL = this.BINANCE_TESTNET_URL;
         const endpoint = '/fapi/v1/order';
 
@@ -274,7 +323,7 @@ export class TakeProfitService {
           }
         });
 
-        this.logger.log(`[CLOSED ${(closePercent * 100).toFixed(0)}%] ${trade.symbol} via ${reason} at ${exitPrice}`);
+        this.logger.log(`[BINANCE] Closed ${(closePercent * 100).toFixed(0)}% of ${trade.symbol} via ${reason} at ${exitPrice}`);
       } else {
         const exchangeInstance = await this.exchangeService.getExchange(
           exchange,

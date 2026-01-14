@@ -5,21 +5,11 @@ import { Repository } from 'typeorm';
 import { Trade, CloseReason } from '../strategies/trade.entity';
 import { StrategiesService } from '../strategies/strategies.service';
 import { ExchangeService } from '../exchange/exchange.service';
+import { BybitClientService } from '../exchange/bybit-client.service';
 import { Exchange } from '../strategies/strategy.entity';
 import { EncryptionUtil } from '../utils/encryption.util';
 import axios from 'axios';
 import * as crypto from 'crypto';
-
-interface BinanceOrder {
-  orderId: number;
-  symbol: string;
-  status: string;
-  type: string;
-  side: string;
-  stopPrice: string;
-  avgPrice: string;
-  executedQty: string;
-}
 
 @Injectable()
 export class StopLossService {
@@ -32,6 +22,7 @@ export class StopLossService {
     private tradesRepository: Repository<Trade>,
     private strategiesService: StrategiesService,
     private exchangeService: ExchangeService,
+    private bybitClient: BybitClientService,
   ) {}
 
   @Cron(CronExpression.EVERY_5_SECONDS)
@@ -53,35 +44,48 @@ export class StopLossService {
     const strategy = await this.strategiesService.findOne(trade.strategyId);
     if (!strategy || strategy.isDryRun) return;
 
+    const exchange = strategy.exchange || Exchange.BINANCE;
     const apiKey = (await EncryptionUtil.decrypt(strategy.apiKey)).trim();
     const apiSecret = (await EncryptionUtil.decrypt(strategy.apiSecret)).trim();
 
-    // Only check order status if we have a valid stopLossOrderId
     if (trade.stopLossOrderId && trade.stopLossOrderId.trim() !== '') {
+      if (trade.stopLossOrderId.startsWith('BYBIT_TRADING_STOP')) {
+        const positions = await this.bybitClient.getPositions(apiKey, apiSecret, strategy.isTestnet, trade.symbol);
+        const position = positions.find(p =>
+          p.symbol === trade.symbol &&
+          ((trade.side === 'BUY' && p.side === 'Buy') || (trade.side === 'SELL' && p.side === 'Sell'))
+        );
+
+        if (!position || parseFloat(position.size) === 0) {
+          this.logger.log(`[STOP LOSS EXECUTED] ${trade.symbol} - Position closed on Bybit`);
+          await this.markTradeAsClosed(trade, 'STOP_LOSS', exchange, apiKey, apiSecret, strategy.isTestnet);
+          return;
+        }
+        return;
+      }
+
       const orderStatus = await this.checkOrderStatus(
         trade.stopLossOrderId,
         trade.symbol,
+        exchange,
         apiKey,
         apiSecret,
         strategy.isTestnet
       );
 
-      if (orderStatus === 'FILLED') {
-        this.logger.log(`[STOP LOSS EXECUTED] ${trade.symbol} - Order was filled on Binance`);
-        await this.markTradeAsClosed(trade, 'STOP_LOSS', apiKey, apiSecret, strategy.isTestnet);
+      if (orderStatus === 'FILLED' || orderStatus === 'Filled') {
+        this.logger.log(`[STOP LOSS EXECUTED] ${trade.symbol} - Order was filled`);
+        await this.markTradeAsClosed(trade, 'STOP_LOSS', exchange, apiKey, apiSecret, strategy.isTestnet);
         return;
-      } else if (orderStatus === 'CANCELED' || orderStatus === 'EXPIRED') {
+      } else if (orderStatus === 'CANCELED' || orderStatus === 'EXPIRED' || orderStatus === 'Cancelled' || orderStatus === 'Deactivated') {
         this.logger.warn(`[STOP LOSS] Order ${trade.stopLossOrderId} was ${orderStatus}, falling back to manual monitoring`);
         trade.stopLossOrderId = null;
         await this.tradesRepository.save(trade);
-      } else if (orderStatus === 'NEW') {
-        // Order is still active, nothing to do
+      } else if (orderStatus === 'NEW' || orderStatus === 'New') {
         return;
       }
-      // If orderStatus is null (API error), fall through to manual monitoring
     }
 
-    // Manual monitoring fallback - only if strategy has stopLossPercentage configured
     if (!strategy.stopLossPercentage) return;
 
     const currentPrice = await this.getCurrentPrice(trade, strategy);
@@ -102,11 +106,22 @@ export class StopLossService {
   private async checkOrderStatus(
     orderId: string,
     symbol: string,
+    exchange: Exchange,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean
   ): Promise<string | null> {
     try {
+      if (exchange === Exchange.BYBIT) {
+        let orderInfo = await this.bybitClient.getOrderInfo(apiKey, apiSecret, isTestnet, symbol, orderId);
+
+        if (!orderInfo) {
+          orderInfo = await this.bybitClient.getOrderHistory(apiKey, apiSecret, isTestnet, symbol, orderId);
+        }
+
+        return orderInfo?.orderStatus || null;
+      }
+
       const baseUrl = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&orderId=${orderId}&timestamp=${timestamp}`;
@@ -127,12 +142,13 @@ export class StopLossService {
   private async markTradeAsClosed(
     trade: Trade,
     reason: CloseReason,
+    exchange: Exchange,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean
   ): Promise<void> {
-    const exitPrice = await this.getLastTradePrice(trade.symbol, apiKey, apiSecret, isTestnet);
-    const currentPrice = exitPrice || await this.getCurrentPrice(trade, { isTestnet } as any);
+    const exitPrice = await this.getLastTradePrice(trade.symbol, exchange, apiKey, apiSecret, isTestnet);
+    const currentPrice = exitPrice || await this.getCurrentPrice(trade, { exchange, isTestnet } as any);
 
     const pnl = this.calculatePnL(trade, currentPrice);
 
@@ -150,11 +166,16 @@ export class StopLossService {
 
   private async getLastTradePrice(
     symbol: string,
+    exchange: Exchange,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean
   ): Promise<number | null> {
     try {
+      if (exchange === Exchange.BYBIT) {
+        return await this.bybitClient.getLastTradePrice(apiKey, apiSecret, isTestnet, symbol);
+      }
+
       const baseUrl = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
       const timestamp = Date.now();
       const queryString = `symbol=${symbol}&limit=1&timestamp=${timestamp}`;
@@ -188,6 +209,10 @@ export class StopLossService {
   private async getCurrentPrice(trade: Trade, strategy: any): Promise<number> {
     try {
       const exchange = strategy.exchange || Exchange.BINANCE;
+
+      if (exchange === Exchange.BYBIT) {
+        return await this.bybitClient.getCurrentPrice(strategy.isTestnet, trade.symbol);
+      }
 
       if (strategy.isTestnet && exchange === Exchange.BINANCE) {
         const response = await axios.get(
@@ -223,7 +248,21 @@ export class StopLossService {
       const closeSide = trade.side === 'BUY' ? 'SELL' : 'BUY';
       const quantity = parseFloat(trade.quantity as any);
 
-      if (strategy.isTestnet && exchange === Exchange.BINANCE) {
+      if (exchange === Exchange.BYBIT) {
+        const bybitSide = closeSide === 'BUY' ? 'Buy' : 'Sell';
+        await this.bybitClient.createOrder(
+          apiKey,
+          apiSecret,
+          strategy.isTestnet,
+          {
+            symbol: trade.symbol,
+            side: bybitSide,
+            orderType: 'Market',
+            qty: quantity.toFixed(3),
+          }
+        );
+        this.logger.log(`[BYBIT] Closed ${trade.symbol} via ${reason} at ${exitPrice}`);
+      } else if (strategy.isTestnet && exchange === Exchange.BINANCE) {
         const baseURL = this.BINANCE_TESTNET_URL;
         const endpoint = '/fapi/v1/order';
 
@@ -245,7 +284,7 @@ export class StopLossService {
           }
         });
 
-        this.logger.log(`[CLOSED] ${trade.symbol} via ${reason} at ${exitPrice}`);
+        this.logger.log(`[BINANCE] Closed ${trade.symbol} via ${reason} at ${exitPrice}`);
       } else {
         const exchangeInstance = await this.exchangeService.getExchange(
           exchange,

@@ -6,6 +6,7 @@ import { fetchStrategies, createStrategy, updateStrategy, deleteStrategy } from 
 const DEFAULT_FORM_DATA = {
   name: 'New Strategy',
   asset: 'BTCUSDT',
+  exchange: 'binance',
   direction: 'LONG',
   leverage: 10,
   marginMode: 'ISOLATED',
@@ -48,6 +49,7 @@ export default function StrategiesPage() {
     setFormData({
       name: strategy.name,
       asset: strategy.asset,
+      exchange: strategy.exchange || 'binance',
       direction: strategy.direction,
       leverage: strategy.leverage,
       marginMode: strategy.marginMode,
@@ -88,6 +90,7 @@ export default function StrategiesPage() {
     const payload: any = {
       name: formData.name,
       asset: formData.asset,
+      exchange: formData.exchange,
       direction: formData.direction,
       leverage: Number(formData.leverage),
       marginMode: formData.marginMode,
@@ -201,7 +204,10 @@ export default function StrategiesPage() {
                   <div className="flex justify-between items-start mb-3">
                     <div>
                       <h4 className="text-white font-bold text-lg">{s.name}</h4>
-                      <span className="text-slate-400 font-mono text-sm">{s.asset}</span>
+                      <div className="flex items-center gap-2">
+                         <span className="text-slate-400 font-mono text-sm">{s.asset}</span>
+                         <span className="text-slate-500 text-xs px-1.5 py-0.5 bg-slate-800 rounded uppercase">{s.exchange || 'binance'}</span>
+                      </div>
                     </div>
                     <div className="flex flex-col items-end gap-1">
                       <span
@@ -315,7 +321,7 @@ export default function StrategiesPage() {
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-3 gap-4">
               <div className="space-y-1">
                 <label className="text-sm font-medium text-slate-300">Asset</label>
                 <input
@@ -324,6 +330,19 @@ export default function StrategiesPage() {
                   value={formData.asset}
                   onChange={handleChange}
                 />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-sm font-medium text-slate-300">Exchange</label>
+                <select
+                  name="exchange"
+                  className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:border-blue-500 outline-none transition"
+                  value={formData.exchange}
+                  onChange={handleChange}
+                >
+                  <option value="binance">Binance</option>
+                  <option value="bybit">Bybit</option>
+                </select>
               </div>
 
               <div className="space-y-1">
@@ -379,10 +398,9 @@ export default function StrategiesPage() {
               </div>
             </div>
 
-            {/* Exchange Keys */}
             <div className="bg-slate-900/50 p-4 rounded-lg border border-slate-700 space-y-4">
               <div className="flex justify-between items-center">
-                <h4 className="text-white font-medium">Exchange Keys (Binance)</h4>
+                <h4 className="text-white font-medium">Exchange Keys ({formData.exchange === 'bybit' ? 'Bybit' : 'Binance'})</h4>
                 {editingId && (
                   <span className="text-xs text-emerald-400 font-mono">Stored securely</span>
                 )}
@@ -430,7 +448,7 @@ export default function StrategiesPage() {
                     checked={formData.isTestnet}
                     onChange={handleChange}
                   />
-                  <span className="text-sm text-slate-300">Use Binance Testnet</span>
+                  <span className="text-sm text-slate-300">Use Testnet (Binance/Bybit)</span>
                 </label>
               </div>
             </div>

@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { TradingviewSignalDto, OrderType } from './dto/tradingview-signal.dto';
 import { ExchangeService } from '../exchange/exchange.service';
+import { BybitClientService } from '../exchange/bybit-client.service';
 import { StrategiesService } from '../strategies/strategies.service';
 import { TradesService } from '../trades/trades.service';
 import { Trade } from '../strategies/trade.entity';
@@ -28,6 +29,7 @@ export class WebhookService {
 
   constructor(
     private readonly exchangeService: ExchangeService,
+    private readonly bybitClient: BybitClientService,
     private readonly strategiesService: StrategiesService,
     private readonly tradesService: TradesService
   ) {}
@@ -36,7 +38,7 @@ export class WebhookService {
     if (exchange === Exchange.BINANCE) {
       return symbol.replace('/', '').replace('-', '');
     } else if (exchange === Exchange.BYBIT) {
-      return symbol.replace('/', '');
+      return symbol.replace('/', '').replace('-', '');
     }
     return symbol;
   }
@@ -74,6 +76,10 @@ export class WebhookService {
 
       const exchange = strategy.exchange || Exchange.BINANCE;
 
+      if (exchange === Exchange.BYBIT) {
+        return await this.bybitClient.getWalletBalance(decryptedKey, decryptedSecret, strategy.isTestnet);
+      }
+
       if (strategy.isTestnet && exchange === Exchange.BINANCE) {
         const baseURL = `${this.BINANCE_TESTNET_URL}/fapi/v2`;
         const endpoint = '/balance';
@@ -104,7 +110,7 @@ export class WebhookService {
     }
   }
 
-  private async configurePositionSettings(
+  private async configureBinancePositionSettings(
     symbol: string,
     leverage: number,
     marginMode: MarginMode,
@@ -129,12 +135,12 @@ export class WebhookService {
           }
         }
       );
-      this.logger.log(`[CONFIG] Margin mode set to ${marginMode} for ${symbol}`);
+      this.logger.log(`[BINANCE] Margin mode set to ${marginMode} for ${symbol}`);
     } catch (error: any) {
       if (error.response?.data?.code === -4046) {
-        this.logger.debug(`[CONFIG] Margin mode already set to ${marginMode} for ${symbol}`);
+        this.logger.debug(`[BINANCE] Margin mode already set to ${marginMode} for ${symbol}`);
       } else {
-        this.logger.warn(`[CONFIG] Failed to set margin mode: ${error.response?.data?.msg || error.message}`);
+        this.logger.warn(`[BINANCE] Failed to set margin mode: ${error.response?.data?.msg || error.message}`);
       }
     }
 
@@ -153,10 +159,22 @@ export class WebhookService {
           }
         }
       );
-      this.logger.log(`[CONFIG] Leverage set to ${leverage}x for ${symbol}`);
+      this.logger.log(`[BINANCE] Leverage set to ${leverage}x for ${symbol}`);
     } catch (error: any) {
-      this.logger.warn(`[CONFIG] Failed to set leverage: ${error.response?.data?.msg || error.message}`);
+      this.logger.warn(`[BINANCE] Failed to set leverage: ${error.response?.data?.msg || error.message}`);
     }
+  }
+
+  private async configureBybitPositionSettings(
+    symbol: string,
+    leverage: number,
+    marginMode: MarginMode,
+    apiKey: string,
+    apiSecret: string,
+    isTestnet: boolean
+  ): Promise<void> {
+    await this.bybitClient.setMarginMode(apiKey, apiSecret, isTestnet, symbol, marginMode, leverage);
+    await this.bybitClient.setLeverage(apiKey, apiSecret, isTestnet, symbol, leverage);
   }
 
   private async createBinanceOrder(
@@ -183,7 +201,7 @@ export class WebhookService {
     return response.data;
   }
 
-  private async createStopLossOrder(
+  private async createBinanceStopLossOrder(
     symbol: string,
     side: 'BUY' | 'SELL',
     quantity: number,
@@ -206,15 +224,15 @@ export class WebhookService {
 
       const response = await this.createBinanceOrder(params, apiKey, apiSecret, isTestnet);
 
-      this.logger.log(`[STOP LOSS ORDER] Created for ${symbol} at ${stopPrice} - Order ID: ${response.orderId}`);
+      this.logger.log(`[BINANCE SL] Created for ${symbol} at ${stopPrice} - Order ID: ${response.orderId}`);
       return response.orderId.toString();
     } catch (error: any) {
-      this.logger.error(`Failed to create stop loss order: ${error.response?.data?.msg || error.message}`);
+      this.logger.error(`[BINANCE] Failed to create stop loss order: ${error.response?.data?.msg || error.message}`);
       return null;
     }
   }
 
-  private async createTakeProfitOrder(
+  private async createBinanceTakeProfitOrder(
     symbol: string,
     side: 'BUY' | 'SELL',
     quantity: number,
@@ -237,10 +255,10 @@ export class WebhookService {
 
       const response = await this.createBinanceOrder(params, apiKey, apiSecret, isTestnet);
 
-      this.logger.log(`[TAKE PROFIT ORDER] Created for ${symbol} at ${takeProfitPrice} - Order ID: ${response.orderId}`);
+      this.logger.log(`[BINANCE TP] Created for ${symbol} at ${takeProfitPrice} - Order ID: ${response.orderId}`);
       return response.orderId.toString();
     } catch (error: any) {
-      this.logger.error(`Failed to create take profit order: ${error.response?.data?.msg || error.message}`);
+      this.logger.error(`[BINANCE] Failed to create take profit order: ${error.response?.data?.msg || error.message}`);
       return null;
     }
   }
@@ -282,16 +300,11 @@ export class WebhookService {
     const normalizedSymbol = this.normalizeSymbol(signal.symbol, exchange);
     const side = signal.action.toUpperCase() as 'BUY' | 'SELL';
 
-    // NOTE: We allow multiple orders for the same symbol/side (pyramiding/averaging)
-    // The position sync will consolidate them into a single position record
-    // This is intentional to support adding to existing positions
-
-    const isLimitOrder = signal.orderType === OrderType.LIMIT && signal.price;
+    const isLimitOrder = signal.orderType === OrderType.LIMIT && !!signal.price;
 
     this.logger.log(
-      `[ORDER CONFIG] orderType: ${signal.orderType || 'undefined'} | ` +
-      `price: ${signal.price || 'undefined'} | ` +
-      `isLimitOrder: ${isLimitOrder}`
+      `[ORDER CONFIG] Exchange: ${exchange} | orderType: ${signal.orderType || 'undefined'} | ` +
+      `price: ${signal.price || 'undefined'} | isLimitOrder: ${isLimitOrder}`
     );
 
     let quantity: number;
@@ -333,80 +346,49 @@ export class WebhookService {
 
       this.logger.log(`[DEBUG] Targeting Exchange: ${exchange} (Testnet: ${strategy.isTestnet})`);
 
-      await this.configurePositionSettings(
-        normalizedSymbol,
-        strategy.leverage || 1,
-        strategy.marginMode || MarginMode.ISOLATED,
-        decryptedKey,
-        decryptedSecret,
-        strategy.isTestnet
-      );
-
-      // CRITICAL: Save trade BEFORE creating Binance order to prevent sync race condition
-      // The sync runs every 10 seconds and might import the position before we save
-      // By saving first, the sync will find our trade and update it instead of importing
       savedTrade = await this.tradesService.create(tradeData);
-      this.logger.log(`[TRADE] Pre-saved trade ${savedTrade.id} before Binance order`);
+      this.logger.log(`[TRADE] Pre-saved trade ${savedTrade.id} before order`);
 
       let tradeDetails: any;
+      let stopLossOrderId: string | null = null;
+      let takeProfitOrderId: string | null = null;
 
-      if (strategy.isTestnet && exchange === Exchange.BINANCE) {
-        this.logger.log('[TESTNET BINANCE] Using Direct Axios Execution');
-
-        const params = new URLSearchParams();
-        params.append('symbol', normalizedSymbol);
-        params.append('side', side);
-
-        if (isLimitOrder) {
-          params.append('type', 'LIMIT');
-          params.append('price', this.formatPrice(signal.price!, normalizedSymbol));
-          params.append('timeInForce', 'GTC');
-          this.logger.log(`[ORDER] Creating LIMIT order at price ${signal.price}`);
-        } else {
-          params.append('type', 'MARKET');
-          this.logger.log(`[ORDER] Creating MARKET order`);
-        }
-
-        params.append('quantity', this.formatQuantity(quantity, normalizedSymbol));
-
-        const response = await this.createBinanceOrder(params, decryptedKey, decryptedSecret, strategy.isTestnet);
-
-        this.logger.log(`[SUCCESS] Order Placed! Order ID: ${response.orderId}`);
-
-        const filledPrice = parseFloat(response.avgPrice || response.price || '0');
-        const finalPrice = filledPrice > 0 ? filledPrice : signal.price;
-
-        tradeDetails = {
-          id: response.orderId.toString(),
-          price: finalPrice,
-          average: finalPrice,
-          status: response.status
-        };
+      if (exchange === Exchange.BYBIT) {
+        tradeDetails = await this.executeBybitOrder(
+          strategy,
+          normalizedSymbol,
+          side,
+          quantity,
+          isLimitOrder,
+          signal,
+          decryptedKey,
+          decryptedSecret
+        );
       } else {
-        const exchangeInstance = await this.exchangeService.getExchange(
-          exchange,
+        await this.configureBinancePositionSettings(
+          normalizedSymbol,
+          strategy.leverage || 1,
+          strategy.marginMode || MarginMode.ISOLATED,
           decryptedKey,
           decryptedSecret,
           strategy.isTestnet
         );
 
-        if (isLimitOrder) {
-          const order = await exchangeInstance.createLimitOrder(signal.symbol, signal.action, quantity, signal.price);
-          this.logger.log(`[REAL] Limit Order Placed via CCXT: ${order.id}`);
-          tradeDetails = order;
-        } else {
-          const order = await exchangeInstance.createMarketOrder(signal.symbol, signal.action, quantity);
-          this.logger.log(`[REAL] Market Order Placed via CCXT: ${order.id}`);
-          tradeDetails = order;
-        }
+        tradeDetails = await this.executeBinanceOrder(
+          strategy,
+          normalizedSymbol,
+          side,
+          quantity,
+          isLimitOrder,
+          signal,
+          decryptedKey,
+          decryptedSecret
+        );
       }
 
       const entryPrice = tradeDetails.average || tradeDetails.price || signal.price;
       tradeData.entryPrice = entryPrice;
       tradeData.exchangeOrderId = tradeDetails.id;
-
-      let stopLossOrderId: string | null = null;
-      let takeProfitOrderId: string | null = null;
 
       let stopLossPrice: number | null = null;
       if (signal.stopLoss) {
@@ -415,22 +397,6 @@ export class WebhookService {
       } else if (strategy.stopLossPercentage && strategy.stopLossPercentage > 0) {
         stopLossPrice = this.calculateStopLossPrice(side, entryPrice, strategy.stopLossPercentage);
         this.logger.log(`[SL] Calculated stop loss from strategy (${strategy.stopLossPercentage}%): ${stopLossPrice}`);
-      }
-
-      if (stopLossPrice) {
-        stopLossOrderId = await this.createStopLossOrder(
-          normalizedSymbol,
-          side,
-          quantity,
-          stopLossPrice,
-          decryptedKey,
-          decryptedSecret,
-          strategy.isTestnet
-        );
-
-        if (stopLossOrderId) {
-          tradeData.stopLossOrderId = stopLossOrderId;
-        }
       }
 
       let takeProfitPrice: number | null = null;
@@ -448,23 +414,67 @@ export class WebhookService {
         }
       }
 
-      if (takeProfitPrice) {
-        takeProfitOrderId = await this.createTakeProfitOrder(
-          normalizedSymbol,
-          side,
-          quantity,
-          takeProfitPrice,
-          decryptedKey,
-          decryptedSecret,
-          strategy.isTestnet
-        );
+      if (exchange === Exchange.BYBIT) {
+        if (stopLossPrice || takeProfitPrice) {
+          const bybitSide = side === 'BUY' ? 'Buy' : 'Sell';
+          const slPrice = stopLossPrice ? this.formatPrice(stopLossPrice, normalizedSymbol) : undefined;
+          const tpPrice = takeProfitPrice ? this.formatPrice(takeProfitPrice, normalizedSymbol) : undefined;
 
-        if (takeProfitOrderId) {
-          tradeData.takeProfitOrderId = takeProfitOrderId;
+          const success = await this.bybitClient.setTradingStop(
+            decryptedKey,
+            decryptedSecret,
+            strategy.isTestnet,
+            normalizedSymbol,
+            bybitSide,
+            slPrice,
+            tpPrice
+          );
+
+          if (success) {
+            if (stopLossPrice) {
+              stopLossOrderId = 'BYBIT_TRADING_STOP_SL';
+              tradeData.stopLossOrderId = stopLossOrderId;
+            }
+            if (takeProfitPrice) {
+              takeProfitOrderId = 'BYBIT_TRADING_STOP_TP';
+              tradeData.takeProfitOrderId = takeProfitOrderId;
+            }
+          }
+        }
+      } else {
+        if (stopLossPrice) {
+          stopLossOrderId = await this.createBinanceStopLossOrder(
+            normalizedSymbol,
+            side,
+            quantity,
+            stopLossPrice,
+            decryptedKey,
+            decryptedSecret,
+            strategy.isTestnet
+          );
+
+          if (stopLossOrderId) {
+            tradeData.stopLossOrderId = stopLossOrderId;
+          }
+        }
+
+        if (takeProfitPrice) {
+          takeProfitOrderId = await this.createBinanceTakeProfitOrder(
+            normalizedSymbol,
+            side,
+            quantity,
+            takeProfitPrice,
+            decryptedKey,
+            decryptedSecret,
+            strategy.isTestnet
+          );
+
+          if (takeProfitOrderId) {
+            tradeData.takeProfitOrderId = takeProfitOrderId;
+          }
         }
       }
 
-      // Update the pre-saved trade with Binance order details
       await this.tradesService.updateTrade(savedTrade.id, {
         entryPrice: tradeData.entryPrice,
         exchangeOrderId: tradeData.exchangeOrderId,
@@ -472,7 +482,7 @@ export class WebhookService {
         takeProfitOrderId: tradeData.takeProfitOrderId,
       });
 
-      this.logger.log(`[TRADE] Updated trade ${savedTrade.id} with Binance order details`);
+      this.logger.log(`[TRADE] Updated trade ${savedTrade.id} with order details`);
 
       return {
         status: 'success',
@@ -485,20 +495,129 @@ export class WebhookService {
     } catch (error: any) {
       this.logger.error('Error executing real trade', error);
 
-      // If we pre-saved a trade, update it with error status
       if (savedTrade && savedTrade.id) {
         await this.tradesService.updateTrade(savedTrade.id, {
           status: 'ERROR',
-          error: error.response?.data?.msg || error.message,
+          error: error.response?.data?.msg || error.response?.data?.retMsg || error.message,
         });
       } else {
-        // Trade wasn't saved yet, create error record
         tradeData.status = 'ERROR';
-        tradeData.error = error.response?.data?.msg || error.message;
+        tradeData.error = error.response?.data?.msg || error.response?.data?.retMsg || error.message;
         await this.tradesService.create(tradeData);
       }
 
       return { status: 'error', message: error.message };
+    }
+  }
+
+  private async executeBybitOrder(
+    strategy: Strategy,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    isLimitOrder: boolean,
+    signal: TradingviewSignalDto,
+    apiKey: string,
+    apiSecret: string
+  ): Promise<any> {
+    await this.configureBybitPositionSettings(
+      symbol,
+      strategy.leverage || 1,
+      strategy.marginMode || MarginMode.ISOLATED,
+      apiKey,
+      apiSecret,
+      strategy.isTestnet
+    );
+
+    const bybitSide = side === 'BUY' ? 'Buy' : 'Sell';
+    const orderType = isLimitOrder ? 'Limit' : 'Market';
+    const formattedQty = this.formatQuantity(quantity, symbol);
+    const formattedPrice = signal.price ? this.formatPrice(signal.price, symbol) : undefined;
+
+    this.logger.log(`[BYBIT] Creating ${orderType} order: ${bybitSide} ${formattedQty} ${symbol}`);
+
+    const result = await this.bybitClient.createOrder(
+      apiKey,
+      apiSecret,
+      strategy.isTestnet,
+      {
+        symbol,
+        side: bybitSide,
+        orderType,
+        qty: formattedQty,
+        price: isLimitOrder ? formattedPrice : undefined,
+      }
+    );
+
+    this.logger.log(`[BYBIT] Order placed! Order ID: ${result.orderId}`);
+
+    return {
+      id: result.orderId,
+      price: signal.price,
+      average: signal.price,
+      status: 'NEW'
+    };
+  }
+
+  private async executeBinanceOrder(
+    strategy: Strategy,
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    quantity: number,
+    isLimitOrder: boolean,
+    signal: TradingviewSignalDto,
+    apiKey: string,
+    apiSecret: string
+  ): Promise<any> {
+    if (strategy.isTestnet) {
+      this.logger.log('[BINANCE TESTNET] Using Direct Axios Execution');
+
+      const params = new URLSearchParams();
+      params.append('symbol', symbol);
+      params.append('side', side);
+
+      if (isLimitOrder) {
+        params.append('type', 'LIMIT');
+        params.append('price', this.formatPrice(signal.price!, symbol));
+        params.append('timeInForce', 'GTC');
+        this.logger.log(`[BINANCE] Creating LIMIT order at price ${signal.price}`);
+      } else {
+        params.append('type', 'MARKET');
+        this.logger.log(`[BINANCE] Creating MARKET order`);
+      }
+
+      params.append('quantity', this.formatQuantity(quantity, symbol));
+
+      const response = await this.createBinanceOrder(params, apiKey, apiSecret, strategy.isTestnet);
+
+      this.logger.log(`[BINANCE] Order Placed! Order ID: ${response.orderId}`);
+
+      const filledPrice = parseFloat(response.avgPrice || response.price || '0');
+      const finalPrice = filledPrice > 0 ? filledPrice : signal.price;
+
+      return {
+        id: response.orderId.toString(),
+        price: finalPrice,
+        average: finalPrice,
+        status: response.status
+      };
+    } else {
+      const exchangeInstance = await this.exchangeService.getExchange(
+        Exchange.BINANCE,
+        apiKey,
+        apiSecret,
+        strategy.isTestnet
+      );
+
+      if (isLimitOrder) {
+        const order = await exchangeInstance.createLimitOrder(signal.symbol, signal.action, quantity, signal.price);
+        this.logger.log(`[BINANCE] Limit Order Placed via CCXT: ${order.id}`);
+        return order;
+      } else {
+        const order = await exchangeInstance.createMarketOrder(signal.symbol, signal.action, quantity);
+        this.logger.log(`[BINANCE] Market Order Placed via CCXT: ${order.id}`);
+        return order;
+      }
     }
   }
 }
