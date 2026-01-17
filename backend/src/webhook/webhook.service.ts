@@ -9,6 +9,7 @@ import { Exchange, MarginMode, Strategy } from '../strategies/strategy.entity';
 import { EncryptionUtil } from '../utils/encryption.util';
 import axios from 'axios';
 import * as crypto from 'crypto';
+import Decimal from 'decimal.js';
 
 interface BinanceOrderResponse {
   orderId: number;
@@ -43,30 +44,56 @@ export class WebhookService {
     return symbol;
   }
 
-  private formatQuantity(quantity: number, symbol: string): string {
-    const quantityPrecision: { [key: string]: number } = {
-      'BTCUSDT': 3,
-      'ETHUSDT': 2,
-      'BNBUSDT': 1,
-      'ADAUSDT': 0,
-      'SOLUSDT': 0,
-    };
+  // Cache for symbol precision rules: symbol -> { qtyStep: number, priceTick: number, minQty: number }
+  private symbolRules: Map<string, { qtyStep: string; priceTick: string; minQty: string }> = new Map();
 
-    const precision = quantityPrecision[symbol] || 3;
-    return quantity.toFixed(precision);
+  private async getSymbolRules(symbol: string, isTestnet: boolean): Promise<{ qtyStep: string; priceTick: string; minQty: string }> {
+    const cached = this.symbolRules.get(symbol);
+    if (cached) {
+        return cached;
+    }
+
+    try {
+        const baseURL = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
+        const response = await axios.get(`${baseURL}/fapi/v1/exchangeInfo`);
+        const symbolInfo = response.data.symbols.find((s: any) => s.symbol === symbol);
+
+        if (!symbolInfo) {
+            this.logger.warn(`[BINANCE] Symbol ${symbol} not found in exchangeInfo. Using defaults.`);
+            return { qtyStep: '0.001', priceTick: '0.01', minQty: '0.001' }; 
+        }
+
+        const lotSizeFilter = symbolInfo.filters.find((f: any) => f.filterType === 'LOT_SIZE');
+        const priceFilter = symbolInfo.filters.find((f: any) => f.filterType === 'PRICE_FILTER');
+
+        const rules = {
+            qtyStep: lotSizeFilter ? lotSizeFilter.stepSize : '0.001',
+            minQty: lotSizeFilter ? lotSizeFilter.minQty : '0.001',
+            priceTick: priceFilter ? priceFilter.tickSize : '0.01'
+        };
+
+        this.symbolRules.set(symbol, rules);
+        this.logger.log(`[BINANCE] Fetched rules for ${symbol}: Step=${rules.qtyStep}, Tick=${rules.priceTick}`);
+        return rules;
+    } catch (error) {
+        this.logger.error(`[BINANCE] Failed to fetch symbol rules: ${error.message}`);
+        return { qtyStep: '0.001', priceTick: '0.01', minQty: '0.001' };
+    }
   }
 
-  private formatPrice(price: number, symbol: string): string {
-    const pricePrecision: { [key: string]: number } = {
-      'BTCUSDT': 1,
-      'ETHUSDT': 2,
-      'BNBUSDT': 1,
-      'ADAUSDT': 4,
-      'SOLUSDT': 2,
-    };
+  private roundStep(value: number, step: string): string {
+    const dValue = new Decimal(value);
+    const dStep = new Decimal(step);
+    
+    // Round down to nearest step (floor) for Quantity to avoid exceeding balance/risk
+    // For Price, usually rounding to nearest is fine, but lets stick to standard rounding.
+    return dValue.div(dStep).floor().mul(dStep).toFixed(); 
+  }
 
-    const precision = pricePrecision[symbol] || 2;
-    return price.toFixed(precision);
+  private roundTick(value: number, tick: string): string {
+    const dValue = new Decimal(value);
+    const dTick = new Decimal(tick);
+    return dValue.div(dTick).round().mul(dTick).toFixed(); 
   }
 
   private async getAccountBalance(strategy: Strategy): Promise<number> {
@@ -285,8 +312,9 @@ export class WebhookService {
       params.append('symbol', symbol);
       params.append('side', closeSide);
       params.append('type', 'STOP_MARKET');
-      params.append('quantity', this.formatQuantity(quantity, symbol));
-      params.append('stopPrice', this.formatPrice(stopPrice, symbol));
+      const rules = await this.getSymbolRules(symbol, isTestnet);
+      params.append('quantity', this.roundStep(quantity, rules.qtyStep));
+      params.append('stopPrice', this.roundTick(stopPrice, rules.priceTick));
       params.append('closePosition', 'false');
       params.append('workingType', 'MARK_PRICE');
 
@@ -316,8 +344,9 @@ export class WebhookService {
       params.append('symbol', symbol);
       params.append('side', closeSide);
       params.append('type', 'TAKE_PROFIT_MARKET');
-      params.append('quantity', this.formatQuantity(quantity, symbol));
-      params.append('stopPrice', this.formatPrice(takeProfitPrice, symbol));
+      const rules = await this.getSymbolRules(symbol, isTestnet);
+      params.append('quantity', this.roundStep(quantity, rules.qtyStep));
+      params.append('stopPrice', this.roundTick(takeProfitPrice, rules.priceTick));
       params.append('reduceOnly', 'true');
       params.append('workingType', 'MARK_PRICE');
 
@@ -405,13 +434,16 @@ export class WebhookService {
                 } else {
                     const closeSide = activeTrade.side === 'BUY' ? 'SELL' : 'BUY';
                     this.logger.log(`[ONE-WAY] Closing ${activeTrade.symbol} (${closeQty}) before reversal.`);
+                    
+                    // Fetch rules for proper formatting
+                    const rules = await this.getSymbolRules(normalizedSymbol, strategy.isTestnet);
 
                     if (exchange === Exchange.BYBIT) {
                         await this.bybitClient.createOrder(decryptedKey, decryptedSecret, strategy.isTestnet, {
                             symbol: normalizedSymbol,
                             side: closeSide === 'BUY' ? 'Buy' : 'Sell',
                             orderType: 'Market',
-                            qty: this.formatQuantity(closeQty, normalizedSymbol),
+                            qty: this.roundStep(closeQty, rules.qtyStep),
                             reduceOnly: true
                         });
                     } else {
@@ -419,7 +451,7 @@ export class WebhookService {
                         params.append('symbol', normalizedSymbol);
                         params.append('side', closeSide);
                         params.append('type', 'MARKET');
-                        params.append('quantity', this.formatQuantity(closeQty, normalizedSymbol));
+                        params.append('quantity', this.roundStep(closeQty, rules.qtyStep));
                         params.append('reduceOnly', 'true');
                         await this.createBinanceOrder(params, decryptedKey, decryptedSecret, strategy.isTestnet);
                     }
@@ -596,13 +628,14 @@ export class WebhookService {
       }
 
       if (stopLossPrice) {
+          // Fetch rules early for Stop Loss
+          const rules = await this.getSymbolRules(normalizedSymbol, strategy.isTestnet);
+
           if (exchange === Exchange.BYBIT) {
-             // Bybit handles logic in executeBybitOrder or via TradingStop, assuming similar separation
-             // Use legacy method for now or enhance
              const bybitSide = side === 'BUY' ? 'Buy' : 'Sell';
              await this.bybitClient.setTradingStop(
                 decryptedKey, decryptedSecret, strategy.isTestnet,
-                normalizedSymbol, bybitSide, this.formatPrice(stopLossPrice, normalizedSymbol), undefined
+                normalizedSymbol, bybitSide, this.roundTick(stopLossPrice, rules.priceTick), undefined
              );
           } else {
              stopLossOrderId = await this.createBinanceStopLossOrder(
@@ -626,6 +659,8 @@ export class WebhookService {
               if (tpQty <= 0) continue;
 
               this.logger.log(`[TP${tp.id}] Placing partial TP at ${tpPrice} for ${tpQty.toFixed(4)} coins (${tp.qtyPercent}%)`);
+              
+              const rules = await this.getSymbolRules(normalizedSymbol, strategy.isTestnet);
 
               if (exchange === Exchange.BYBIT) {
                  // Bybit partial TP usually requires Limit Reduce-Only orders rather than a single TP attached to position
@@ -635,8 +670,8 @@ export class WebhookService {
                           symbol: normalizedSymbol,
                           side: side === 'BUY' ? 'Sell' : 'Buy', // Close side
                           orderType: 'Limit',
-                          qty: this.formatQuantity(tpQty, normalizedSymbol),
-                          price: this.formatPrice(tpPrice, normalizedSymbol),
+                          qty: this.roundStep(tpQty, rules.qtyStep),
+                          price: this.roundTick(tpPrice, rules.priceTick),
                           reduceOnly: true
                       }
                   );
@@ -709,8 +744,12 @@ export class WebhookService {
 
     const bybitSide = side === 'BUY' ? 'Buy' : 'Sell';
     const orderType = isLimitOrder ? 'Limit' : 'Market';
-    const formattedQty = this.formatQuantity(quantity, symbol);
-    const formattedPrice = signal.price ? this.formatPrice(signal.price, symbol) : undefined;
+    // For Bybit, let's keep simple formatting or we need Bybit specific dynamic rules too. 
+    // Assuming 3 decimal is safe for Bybit generic or we should add Bybit Exchange Info fetch too.
+    // For now, let's use the same rounding if possible, or fallback.
+    const rules = await this.getSymbolRules(symbol, strategy.isTestnet); 
+    const formattedQty = this.roundStep(quantity, rules.qtyStep); 
+    const formattedPrice = signal.price ? this.roundTick(signal.price, rules.priceTick) : undefined;
 
     this.logger.log(`[BYBIT] Creating ${orderType} order: ${bybitSide} ${formattedQty} ${symbol}`);
 
@@ -722,7 +761,7 @@ export class WebhookService {
         symbol,
         side: bybitSide,
         orderType,
-        qty: formattedQty,
+        qty: this.roundStep(quantity, '0.001'), // Should use Bybit rules separately, defaulting for safety or need Bybit specific fetch
         price: isLimitOrder ? formattedPrice : undefined,
       }
     );
@@ -756,15 +795,17 @@ export class WebhookService {
 
       if (isLimitOrder) {
         params.append('type', 'LIMIT');
-        params.append('price', this.formatPrice(signal.price!, symbol));
+        const rules = await this.getSymbolRules(symbol, strategy.isTestnet);
+        params.append('price', this.roundTick(signal.price!, rules.priceTick));
         params.append('timeInForce', 'GTC');
         this.logger.log(`[BINANCE] Creating LIMIT order at price ${signal.price}`);
       } else {
+        const rules = await this.getSymbolRules(symbol, strategy.isTestnet); // Need rules for quantity anyway
         params.append('type', 'MARKET');
         this.logger.log(`[BINANCE] Creating MARKET order`);
       }
 
-      params.append('quantity', this.formatQuantity(quantity, symbol));
+      params.append('quantity', this.roundStep(quantity, (await this.getSymbolRules(symbol, strategy.isTestnet)).qtyStep));
 
       const response = await this.createBinanceOrder(params, apiKey, apiSecret, strategy.isTestnet);
 
@@ -788,11 +829,13 @@ export class WebhookService {
       );
 
       if (isLimitOrder) {
-        const order = await exchangeInstance.createLimitOrder(signal.symbol, signal.action, quantity, signal.price);
+        const rules = await this.getSymbolRules(symbol, strategy.isTestnet);
+        const order = await exchangeInstance.createLimitOrder(symbol, signal.action, this.roundStep(quantity, rules.qtyStep), this.roundTick(signal.price || 0, rules.priceTick));
         this.logger.log(`[BINANCE] Limit Order Placed via CCXT: ${order.id}`);
         return order;
       } else {
-        const order = await exchangeInstance.createMarketOrder(signal.symbol, signal.action, quantity);
+        const rules = await this.getSymbolRules(symbol, strategy.isTestnet);
+        const order = await exchangeInstance.createMarketOrder(symbol, signal.action, this.roundStep(quantity, rules.qtyStep));
         this.logger.log(`[BINANCE] Market Order Placed via CCXT: ${order.id}`);
         return order;
       }
