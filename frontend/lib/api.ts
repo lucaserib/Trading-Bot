@@ -1,4 +1,10 @@
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+const getApiUrl = () => {
+  const url = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+  if (url.startsWith('http')) return url;
+  return `https://${url}`;
+};
+
+const API_URL = getApiUrl();
 
 export async function fetchStrategies() {
   const res = await fetch(`${API_URL}/api/strategies`, {
