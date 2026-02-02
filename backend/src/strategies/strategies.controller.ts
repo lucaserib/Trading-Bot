@@ -248,4 +248,9 @@ ${visualization}
     }
     return { success: true, message: `Resumed ${resumed} strategies` };
   }
+
+  @Get(':id/open-orders')
+  async getOpenOrders(@Param('id') id: string) {
+    return this.strategiesService.getOpenOrders(id);
+  }
 }

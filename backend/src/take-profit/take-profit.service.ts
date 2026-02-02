@@ -25,6 +25,11 @@ export class TakeProfitService {
     private bybitClient: BybitClientService,
   ) {}
 
+  private formatQuantityWithUsdt(quantity: number, price: number): string {
+    const usdt = quantity * price;
+    return `${quantity.toFixed(4)} (~${usdt.toFixed(2)} USDT)`;
+  }
+
   @Cron(CronExpression.EVERY_5_SECONDS)
   async monitorTakeProfit() {
     const openTrades = await this.tradesRepository.find({ where: { status: 'OPEN' } });
@@ -42,7 +47,7 @@ export class TakeProfitService {
 
   private async checkTakeProfit(trade: Trade) {
     const strategy = await this.strategiesService.findOne(trade.strategyId);
-    if (!strategy || strategy.isDryRun) return;
+    if (!strategy) return;
 
     const exchange = strategy.exchange || Exchange.BINANCE;
     const apiKey = (await EncryptionUtil.decrypt(strategy.apiKey)).trim();
@@ -98,13 +103,19 @@ export class TakeProfitService {
     const profitPercent = this.calculateProfitPercent(trade, currentPrice);
 
     if (tp3 && this.shouldTrigger(trade, currentPrice, tp3)) {
-      this.logger.log(`[TAKE-PROFIT 3 HIT] ${trade.symbol} at ${currentPrice} (TP3: ${tp3}, Profit: ${profitPercent.toFixed(2)}%)`);
+      const entryPrice = parseFloat(trade.entryPrice as any);
+      this.logger.log(`[TAKE-PROFIT 3 HIT] ${trade.symbol}`);
+      this.logger.log(`├─ Entry: ${entryPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)} (${profitPercent > 0 ? '+' : ''}${profitPercent.toFixed(2)}%)`);
       await this.closePosition(trade, strategy, currentPrice, 'TAKE_PROFIT_3', 1.0);
     } else if (tp2 && this.shouldTrigger(trade, currentPrice, tp2)) {
-      this.logger.log(`[TAKE-PROFIT 2 HIT] ${trade.symbol} at ${currentPrice} (TP2: ${tp2}, Profit: ${profitPercent.toFixed(2)}%)`);
+      const entryPrice = parseFloat(trade.entryPrice as any);
+      this.logger.log(`[TAKE-PROFIT 2 HIT] ${trade.symbol}`);
+      this.logger.log(`├─ Entry: ${entryPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)} (${profitPercent > 0 ? '+' : ''}${profitPercent.toFixed(2)}%)`);
       await this.closePosition(trade, strategy, currentPrice, 'TAKE_PROFIT_2', 0.5);
     } else if (tp1 && this.shouldTrigger(trade, currentPrice, tp1)) {
-      this.logger.log(`[TAKE-PROFIT 1 HIT] ${trade.symbol} at ${currentPrice} (TP1: ${tp1}, Profit: ${profitPercent.toFixed(2)}%)`);
+      const entryPrice = parseFloat(trade.entryPrice as any);
+      this.logger.log(`[TAKE-PROFIT 1 HIT] ${trade.symbol}`);
+      this.logger.log(`├─ Entry: ${entryPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)} (${profitPercent > 0 ? '+' : ''}${profitPercent.toFixed(2)}%)`);
       await this.closePosition(trade, strategy, currentPrice, 'TAKE_PROFIT_1', 0.33);
     }
   }
@@ -300,7 +311,7 @@ export class TakeProfitService {
             qty: closeQuantity.toFixed(3),
           }
         );
-        this.logger.log(`[BYBIT] Closed ${(closePercent * 100).toFixed(0)}% of ${trade.symbol} via ${reason} at ${exitPrice}`);
+        this.logger.log(`[BYBIT] Closed ${(closePercent * 100).toFixed(0)}% of ${trade.symbol} via ${reason}`);
       } else if (strategy.isTestnet && exchange === Exchange.BINANCE) {
         const baseURL = this.BINANCE_TESTNET_URL;
         const endpoint = '/fapi/v1/order';
@@ -323,7 +334,7 @@ export class TakeProfitService {
           }
         });
 
-        this.logger.log(`[BINANCE] Closed ${(closePercent * 100).toFixed(0)}% of ${trade.symbol} via ${reason} at ${exitPrice}`);
+        this.logger.log(`[BINANCE] Closed ${(closePercent * 100).toFixed(0)}% of ${trade.symbol} via ${reason}`);
       } else {
         const exchangeInstance = await this.exchangeService.getExchange(
           exchange,
@@ -333,7 +344,7 @@ export class TakeProfitService {
         );
 
         await exchangeInstance.createMarketOrder(trade.symbol, closeSide.toLowerCase(), closeQuantity);
-        this.logger.log(`[CLOSED ${(closePercent * 100).toFixed(0)}%] ${trade.symbol} via ${reason} at ${exitPrice}`);
+        this.logger.log(`[CLOSED ${(closePercent * 100).toFixed(0)}%] ${trade.symbol} via ${reason}`);
       }
 
       const pnl = this.calculatePnL(trade, exitPrice, closePercent);
@@ -345,17 +356,24 @@ export class TakeProfitService {
         trade.closeReason = reason;
         trade.closedAt = new Date();
         trade.binancePositionAmt = 0 as any;
+
+        await this.tradesRepository.save(trade);
+
+        this.logger.log(`├─ Closed: ${this.formatQuantityWithUsdt(closeQuantity, exitPrice)} (100%)`);
+        this.logger.log(`└─ P&L: ${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDT`);
       } else {
         const remainingQuantity = quantity * (1 - closePercent);
         trade.quantity = remainingQuantity as any;
         const currentPnl = parseFloat(trade.pnl as any) || 0;
         trade.pnl = (currentPnl + pnl) as any;
         trade.binancePositionAmt = remainingQuantity as any;
+
+        await this.tradesRepository.save(trade);
+
+        this.logger.log(`├─ Closed: ${this.formatQuantityWithUsdt(closeQuantity, exitPrice)} (${(closePercent * 100).toFixed(0)}%)`);
+        this.logger.log(`├─ Remaining: ${this.formatQuantityWithUsdt(remainingQuantity, exitPrice)}`);
+        this.logger.log(`└─ P&L: ${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDT`);
       }
-
-      await this.tradesRepository.save(trade);
-
-      this.logger.log(`[P&L] ${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDT (Remaining: ${parseFloat(trade.quantity as any)})`);
 
     } catch (error) {
       this.logger.error(`Failed to close position: ${error.message}`);

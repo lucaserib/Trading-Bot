@@ -67,8 +67,8 @@ export class PositionSyncService {
 
     try {
       const activeStrategies = await this.strategiesRepository.find({
-        where: { isActive: true, isDryRun: false },
-        select: ['id', 'name', 'asset', 'exchange', 'isTestnet', 'apiKey', 'apiSecret']
+        where: { isActive: true },
+        select: ['id', 'name', 'asset', 'exchange', 'isTestnet', 'isRealAccount', 'apiKey', 'apiSecret']
       });
 
       for (const strategy of activeStrategies) {
@@ -92,8 +92,8 @@ export class PositionSyncService {
     let consolidated = 0;
 
     const activeStrategies = await this.strategiesRepository.find({
-      where: { isActive: true, isDryRun: false },
-      select: ['id', 'name', 'asset', 'exchange', 'isTestnet', 'apiKey', 'apiSecret']
+      where: { isActive: true },
+      select: ['id', 'name', 'asset', 'exchange', 'isTestnet', 'isRealAccount', 'apiKey', 'apiSecret']
     });
 
     for (const strategy of activeStrategies) {

@@ -369,9 +369,7 @@ export default function Home() {
                   <div className="flex flex-col gap-1">
                     <span
                       className={`px-2 py-1 rounded text-xs font-semibold ${
-                        item.status === 'SIMULATED'
-                          ? 'bg-yellow-500/20 text-yellow-400'
-                          : item.status === 'OPEN'
+                        item.status === 'OPEN'
                           ? 'bg-blue-500/20 text-blue-400'
                           : item.status === 'CLOSED'
                           ? 'bg-slate-500/20 text-slate-300'

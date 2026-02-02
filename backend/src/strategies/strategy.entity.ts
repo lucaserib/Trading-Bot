@@ -41,11 +41,11 @@ export class Strategy {
   @Column({ default: true })
   isActive: boolean;
 
-  @Column({ default: true })
-  isDryRun: boolean;
-
   @Column({ default: false })
   isTestnet: boolean;
+
+  @Column({ default: false })
+  isRealAccount: boolean;
 
   @Column({ type: 'text', nullable: true, select: false }) 
   apiKey: string;

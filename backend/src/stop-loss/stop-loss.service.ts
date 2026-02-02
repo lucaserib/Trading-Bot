@@ -25,6 +25,11 @@ export class StopLossService {
     private bybitClient: BybitClientService,
   ) {}
 
+  private formatQuantityWithUsdt(quantity: number, price: number): string {
+    const usdt = quantity * price;
+    return `${quantity.toFixed(4)} (~${usdt.toFixed(2)} USDT)`;
+  }
+
   @Cron(CronExpression.EVERY_5_SECONDS)
   async monitorStopLoss() {
     const openTrades = await this.tradesRepository.find({ where: { status: 'OPEN' } });
@@ -42,7 +47,7 @@ export class StopLossService {
 
   private async checkStopLoss(trade: Trade) {
     const strategy = await this.strategiesService.findOne(trade.strategyId);
-    if (!strategy || strategy.isDryRun) return;
+    if (!strategy) return;
 
     const exchange = strategy.exchange || Exchange.BINANCE;
     const apiKey = (await EncryptionUtil.decrypt(strategy.apiKey)).trim();
@@ -98,7 +103,14 @@ export class StopLossService {
       (trade.side === 'SELL' && currentPrice >= stopLossPrice);
 
     if (shouldTrigger) {
-      this.logger.warn(`[STOP-LOSS TRIGGERED] ${trade.symbol} at ${currentPrice} (SL: ${stopLossPrice})`);
+      const entryPrice = parseFloat(trade.entryPrice as any);
+      const lossPercent = trade.side === 'BUY'
+        ? ((currentPrice - entryPrice) / entryPrice) * 100
+        : ((entryPrice - currentPrice) / entryPrice) * 100;
+
+      this.logger.warn(`[STOP-LOSS TRIGGERED] ${trade.symbol}`);
+      this.logger.warn(`├─ Entry: ${entryPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)} (${lossPercent.toFixed(2)}%)`);
+      this.logger.warn(`└─ SL Price: ${stopLossPrice.toFixed(2)}`);
       await this.closePosition(trade, strategy, currentPrice, 'STOP_LOSS');
     }
   }
@@ -261,7 +273,7 @@ export class StopLossService {
             qty: quantity.toFixed(3),
           }
         );
-        this.logger.log(`[BYBIT] Closed ${trade.symbol} via ${reason} at ${exitPrice}`);
+        this.logger.warn(`[BYBIT] Closed ${trade.symbol} via ${reason}`);
       } else if (strategy.isTestnet && exchange === Exchange.BINANCE) {
         const baseURL = this.BINANCE_TESTNET_URL;
         const endpoint = '/fapi/v1/order';
@@ -284,7 +296,7 @@ export class StopLossService {
           }
         });
 
-        this.logger.log(`[BINANCE] Closed ${trade.symbol} via ${reason} at ${exitPrice}`);
+        this.logger.warn(`[BINANCE] Closed ${trade.symbol} via ${reason}`);
       } else {
         const exchangeInstance = await this.exchangeService.getExchange(
           exchange,
@@ -294,7 +306,7 @@ export class StopLossService {
         );
 
         await exchangeInstance.createMarketOrder(trade.symbol, closeSide.toLowerCase(), quantity);
-        this.logger.log(`[CLOSED] ${trade.symbol} via ${reason} at ${exitPrice}`);
+        this.logger.warn(`[CLOSED] ${trade.symbol} via ${reason}`);
       }
 
       const pnl = this.calculatePnL(trade, exitPrice);
@@ -308,7 +320,7 @@ export class StopLossService {
 
       await this.tradesRepository.save(trade);
 
-      this.logger.log(`[P&L] ${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDT`);
+      this.logger.warn(`└─ Closed: ${this.formatQuantityWithUsdt(quantity, exitPrice)} | P&L: ${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDT`);
 
     } catch (error) {
       this.logger.error(`Failed to close position: ${error.message}`);

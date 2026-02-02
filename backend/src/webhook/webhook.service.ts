@@ -101,7 +101,12 @@ export class WebhookService {
   private roundTick(value: number, tick: string): string {
     const dValue = new Decimal(value);
     const dTick = new Decimal(tick);
-    return dValue.div(dTick).round().mul(dTick).toFixed(); 
+    return dValue.div(dTick).round().mul(dTick).toFixed();
+  }
+
+  private formatQuantityWithUsdt(quantity: number, price: number): string {
+    const usdt = quantity * price;
+    return `${quantity.toFixed(4)} (~${usdt.toFixed(2)} USDT)`;
   }
 
   private async getAccountBalance(strategy: Strategy): Promise<number> {
@@ -517,7 +522,7 @@ export class WebhookService {
                    closeReason: 'SIGNAL',
                    closedAt: new Date()
                  });
-                 this.logger.log(`[ONE-WAY] Position closed with P&L: ${pnl.toFixed(4)} USDT`);
+                 this.logger.log(`[ONE-WAY] Position closed | Qty: ${this.formatQuantityWithUsdt(quantity, exitPrice)} | P&L: ${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDT`);
                  this.logger.log(`[ONE-WAY] Waiting 2s before new entry...`);
                  await new Promise(r => setTimeout(r, 2000)); 
 
@@ -557,47 +562,47 @@ export class WebhookService {
     if (signal.quantity) {
       quantity = signal.quantity;
       notional = quantity * effectivePrice!;
-      this.logger.log(`Using explicit quantity from signal: ${quantity} (Notional: ~${notional.toFixed(2)} USDT)`);
+      this.logger.log(`Using explicit quantity from signal: ${this.formatQuantityWithUsdt(quantity, effectivePrice!)}`);
     } else if (signal.accountPercentage && effectivePrice) {
       const accountBalance = await this.getAccountBalance(strategy);
-      this.logger.log(`[DEBUG] Fetched Account Balance: ${accountBalance} USDT`);
+      this.logger.log(`[DEBUG] Fetched Account Balance: ${accountBalance.toFixed(2)} USDT`);
       
       const targetNotional = accountBalance * (signal.accountPercentage / 100);
       quantity = targetNotional / effectivePrice;
       notional = targetNotional;
       
-      this.logger.log(`Calculated quantity from ${signal.accountPercentage}% of balance: ${quantity.toFixed(5)} (Target Notional: ${targetNotional.toFixed(2)} USDT)`);
+      this.logger.log(`Calculated quantity from ${signal.accountPercentage}% of balance: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
     } else if (strategy.useAccountPercentage && strategy.accountPercentage && effectivePrice) {
       if (!strategy.enableCompound) {
         const lastTradeWithQty = await this.tradesService.findLastTradeWithInitialQuantity(strategy.id);
         if (lastTradeWithQty && lastTradeWithQty.initialQuantity) {
           quantity = parseFloat(lastTradeWithQty.initialQuantity as any);
           notional = quantity * effectivePrice;
-          this.logger.log(`[COMPOUND OFF] Using fixed quantity from first trade: ${quantity.toFixed(5)} (Notional: ${notional.toFixed(2)} USDT)`);
+          this.logger.log(`[COMPOUND OFF] Using fixed quantity from first trade: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
         } else {
           const accountBalance = await this.getAccountBalance(strategy);
-          this.logger.log(`[DEBUG] Fetched Account Balance: ${accountBalance} USDT`);
+          this.logger.log(`[DEBUG] Fetched Account Balance: ${accountBalance.toFixed(2)} USDT`);
 
           const targetNotional = accountBalance * (strategy.accountPercentage / 100);
           quantity = targetNotional / effectivePrice;
           notional = targetNotional;
 
-          this.logger.log(`[COMPOUND OFF] First trade - calculating initial quantity from ${strategy.accountPercentage}% of balance: ${quantity.toFixed(5)} (Target Notional: ${targetNotional.toFixed(2)} USDT)`);
+          this.logger.log(`[COMPOUND OFF] First trade - calculating initial quantity from ${strategy.accountPercentage}% of balance: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
         }
       } else {
         const accountBalance = await this.getAccountBalance(strategy);
-        this.logger.log(`[DEBUG] Fetched Account Balance: ${accountBalance} USDT`);
+        this.logger.log(`[DEBUG] Fetched Account Balance: ${accountBalance.toFixed(2)} USDT`);
 
         const targetNotional = accountBalance * (strategy.accountPercentage / 100);
         quantity = targetNotional / effectivePrice;
         notional = targetNotional;
 
-        this.logger.log(`[COMPOUND ON] Calculated quantity from strategy ${strategy.accountPercentage}% of balance: ${quantity.toFixed(5)} (Target Notional: ${targetNotional.toFixed(2)} USDT)`);
+        this.logger.log(`[COMPOUND ON] Calculated quantity from strategy ${strategy.accountPercentage}% of balance: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
       }
     } else {
       quantity = strategy.defaultQuantity || 0.002;
       notional = quantity * (effectivePrice || 0); // fallback if effectivePrice undefined
-      this.logger.log(`Using default quantity from strategy: ${quantity} (Notional: ~${notional.toFixed(2)} USDT)`);
+      this.logger.log(`Using default quantity from strategy: ${this.formatQuantityWithUsdt(quantity, effectivePrice || 0)}`);
     }
 
     if (notional < 5) {
@@ -638,12 +643,28 @@ export class WebhookService {
       initialQuantity: shouldSaveInitialQuantity ? quantity : undefined,
     };
 
-    if (strategy.isDryRun) {
-      this.logger.log(`[DRY RUN] Simulating ${signal.action} on ${signal.symbol}`);
-      tradeData.status = 'SIMULATED';
-      tradeData.pnl = 0;
+    if (!strategy.isTestnet && !strategy.isRealAccount) {
+      this.logger.warn(
+        `[BLOCKED] Strategy "${strategy.name}" has neither testnet nor real account enabled. ` +
+        `Please enable either testnet mode or real account mode to execute orders.`
+      );
+      tradeData.status = 'ERROR';
+      tradeData.error = 'Strategy must have either testnet or real account enabled';
       await this.tradesService.create(tradeData);
-      return { status: 'success', message: 'Dry Run Order Logged', trade: tradeData };
+      return {
+        status: 'error',
+        message: 'Strategy must have either testnet or real account enabled. Please update strategy settings.',
+        trade: tradeData
+      };
+    }
+
+    const accountMode = strategy.isTestnet ? 'TESTNET' : 'MAINNET';
+    const executionMode = (!strategy.isTestnet && strategy.isRealAccount) ? '[REAL ACCOUNT]' : `[${accountMode}]`;
+
+    if (!strategy.isTestnet && strategy.isRealAccount) {
+      this.logger.warn(`🚨 ${executionMode} EXECUTING REAL ORDER: ${side} ${this.formatQuantityWithUsdt(quantity, effectivePrice)} on ${normalizedSymbol}`);
+    } else {
+      this.logger.log(`${executionMode} Executing: ${side} ${this.formatQuantityWithUsdt(quantity, effectivePrice)} on ${normalizedSymbol}`);
     }
 
     let savedTrade: Trade | null = null;
@@ -739,7 +760,7 @@ export class WebhookService {
               
               if (tpQty <= 0) continue;
 
-              this.logger.log(`[TP${tp.id}] Placing partial TP at ${tpPrice} for ${tpQty.toFixed(4)} coins (${tp.qtyPercent}%)`);
+              this.logger.log(`[TP${tp.id}] Placing partial TP at ${tpPrice.toFixed(2)} for ${this.formatQuantityWithUsdt(tpQty, tpPrice)} (${tp.qtyPercent}%)`);
               
               const rules = await this.getSymbolRules(normalizedSymbol, strategy.isTestnet);
 

@@ -33,7 +33,7 @@ export class Trade {
   pnl: number | null;
 
   @Column({ default: 'OPEN' })
-  status: 'OPEN' | 'CLOSED' | 'SIMULATED' | 'ERROR';
+  status: 'OPEN' | 'CLOSED' | 'ERROR';
 
   @Column({ type: 'text', nullable: true })
   exchangeOrderId: string | null;

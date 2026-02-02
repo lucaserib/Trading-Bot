@@ -17,7 +17,7 @@ export class TradesService {
   async findAll(status?: string, limit: number = 50): Promise<Trade[]> {
     const where: any = {};
 
-    if (status && ['OPEN', 'CLOSED', 'SIMULATED', 'ERROR'].includes(status.toUpperCase())) {
+    if (status && ['OPEN', 'CLOSED', 'ERROR'].includes(status.toUpperCase())) {
       where.status = status.toUpperCase();
     }
 

@@ -15,8 +15,8 @@ const DEFAULT_FORM_DATA = {
   takeProfit2: 2,
   takeProfit3: 3,
   moveSLToBreakeven: true,
-  isDryRun: true,
   isTestnet: false,
+  isRealAccount: false,
   apiKey: '',
   apiSecret: '',
   defaultQuantity: 0.002,
@@ -70,8 +70,8 @@ export default function StrategiesPage() {
       takeProfit2: strategy.takeProfitPercentage2 || 2,
       takeProfit3: strategy.takeProfitPercentage3 || 3,
       moveSLToBreakeven: strategy.moveSLToBreakeven ?? true,
-      isDryRun: strategy.isDryRun,
       isTestnet: strategy.isTestnet,
+      isRealAccount: strategy.isRealAccount || false,
       apiKey: '',
       apiSecret: '',
       defaultQuantity: strategy.defaultQuantity || 0.002,
@@ -123,8 +123,8 @@ export default function StrategiesPage() {
       takeProfitPercentage2: Number(formData.takeProfit2) || null,
       takeProfitPercentage3: Number(formData.takeProfit3) || null,
       moveSLToBreakeven: formData.moveSLToBreakeven,
-      isDryRun: formData.isDryRun,
       isTestnet: formData.isTestnet,
+      isRealAccount: formData.isRealAccount,
       isActive: true,
       defaultQuantity: Number(formData.defaultQuantity),
       nextCandleEntry: formData.nextCandleEntry,
@@ -248,14 +248,14 @@ export default function StrategiesPage() {
                     <div className="flex flex-col items-end gap-1">
                       <span
                         className={`px-2 py-1 rounded text-xs font-bold ${
-                          s.isDryRun
-                            ? 'bg-yellow-500/20 text-yellow-400 border border-yellow-500/30'
-                            : s.isTestnet
+                          s.isTestnet
                             ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30'
-                            : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                            : s.isRealAccount
+                            ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                            : 'bg-slate-500/20 text-slate-400 border border-slate-500/30'
                         }`}
                       >
-                        {s.isDryRun ? 'DRY RUN' : s.isTestnet ? 'TESTNET' : 'LIVE'}
+                        {s.isTestnet ? 'TESTNET' : s.isRealAccount ? '🚨 REAL ACCOUNT' : 'MAINNET'}
                       </span>
                       <span className="text-xs text-slate-500">{s.direction}</span>
                     </div>
@@ -692,16 +692,6 @@ export default function StrategiesPage() {
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
                     type="checkbox"
-                    name="isDryRun"
-                    className="w-4 h-4 accent-yellow-500"
-                    checked={formData.isDryRun}
-                    onChange={handleChange}
-                  />
-                  <span className="text-sm text-slate-300">Dry Run Mode (Simulate Only)</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
                     name="isTestnet"
                     className="w-4 h-4 accent-blue-500"
                     checked={formData.isTestnet}
@@ -709,6 +699,24 @@ export default function StrategiesPage() {
                   />
                   <span className="text-sm text-slate-300">Use Testnet (Binance/Bybit)</span>
                 </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    name="isRealAccount"
+                    className="w-4 h-4 accent-emerald-500"
+                    checked={formData.isRealAccount}
+                    onChange={handleChange}
+                    disabled={formData.isTestnet}
+                  />
+                  <span className={`text-sm ${formData.isRealAccount && !formData.isTestnet ? 'text-emerald-400 font-bold' : 'text-slate-300'}`}>
+                    🚨 Enable Real Account Trading
+                  </span>
+                </label>
+                {!formData.isTestnet && !formData.isRealAccount && (
+                  <p className="text-xs text-rose-400 ml-6 font-semibold">
+                    ⚠️ WARNING: You must enable either Testnet OR Real Account. Orders will be BLOCKED without one of these enabled.
+                  </p>
+                )}
               </div>
             </div>
 

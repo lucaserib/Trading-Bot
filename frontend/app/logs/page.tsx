@@ -10,7 +10,7 @@ interface LogEntry {
   exitPrice?: number;
   quantity: number;
   pnl: number | null;
-  status: 'OPEN' | 'CLOSED' | 'SIMULATED' | 'ERROR';
+  status: 'OPEN' | 'CLOSED' | 'ERROR';
   closeReason?: string;
   error?: string;
   strategyId: string;
@@ -110,7 +110,6 @@ export default function LogsPage() {
       <span key="status" className={`ml-2 px-2 py-0.5 rounded text-xs ${
         log.status === 'OPEN' ? 'bg-blue-500/20 text-blue-400' :
         log.status === 'CLOSED' ? 'bg-slate-500/20 text-slate-300' :
-        log.status === 'SIMULATED' ? 'bg-yellow-500/20 text-yellow-400' :
         'bg-rose-500/20 text-rose-400'
       }`}>
         {log.status}

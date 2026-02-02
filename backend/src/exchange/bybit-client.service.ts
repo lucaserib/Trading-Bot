@@ -502,6 +502,40 @@ export class BybitClientService {
     }
   }
 
+  async getOpenOrders(
+    apiKey: string,
+    apiSecret: string,
+    isTestnet: boolean,
+    symbol?: string
+  ): Promise<BybitOrderInfo[]> {
+    const baseUrl = this.getBaseUrl(isTestnet);
+    const endpoint = '/v5/order/realtime';
+
+    const params: Record<string, string> = {
+      category: 'linear',
+    };
+
+    if (symbol) {
+      params.symbol = symbol;
+    }
+
+    const queryString = new URLSearchParams(params).toString();
+    const headers = this.getHeaders(apiKey, apiSecret, queryString);
+
+    try {
+      const response = await axios.get(`${baseUrl}${endpoint}?${queryString}`, { headers });
+
+      if (response.data.retCode !== 0) {
+        throw new Error(`Bybit API Error: ${response.data.retMsg}`);
+      }
+
+      return response.data.result.list || [];
+    } catch (error: any) {
+      this.logger.error(`[BYBIT] Failed to get open orders: ${error.response?.data?.retMsg || error.message}`);
+      return [];
+    }
+  }
+
   async cancelAllOrders(
     apiKey: string,
     apiSecret: string,
