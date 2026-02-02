@@ -662,9 +662,9 @@ export class WebhookService {
     const executionMode = (!strategy.isTestnet && strategy.isRealAccount) ? '[REAL ACCOUNT]' : `[${accountMode}]`;
 
     if (!strategy.isTestnet && strategy.isRealAccount) {
-      this.logger.warn(`🚨 ${executionMode} EXECUTING REAL ORDER: ${side} ${this.formatQuantityWithUsdt(quantity, effectivePrice)} on ${normalizedSymbol}`);
+      this.logger.warn(`🚨 ${executionMode} EXECUTING REAL ORDER: ${side} ${this.formatQuantityWithUsdt(quantity, effectivePrice || 0)} on ${normalizedSymbol}`);
     } else {
-      this.logger.log(`${executionMode} Executing: ${side} ${this.formatQuantityWithUsdt(quantity, effectivePrice)} on ${normalizedSymbol}`);
+      this.logger.log(`${executionMode} Executing: ${side} ${this.formatQuantityWithUsdt(quantity, effectivePrice || 0)} on ${normalizedSymbol}`);
     }
 
     let savedTrade: Trade | null = null;
