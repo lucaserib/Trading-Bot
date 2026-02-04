@@ -113,6 +113,11 @@ export class PositionSyncService {
   }
 
   private async syncStrategyPositions(strategy: Strategy): Promise<{ synced: number; closed: number; imported: number; consolidated: number }> {
+    if (!strategy.apiKey || !strategy.apiSecret) {
+      this.logger.debug(`[SYNC] Skipping strategy ${strategy.name} - No API keys configured`);
+      return { synced: 0, closed: 0, imported: 0, consolidated: 0 };
+    }
+
     const exchange = strategy.exchange || Exchange.BINANCE;
     const { apiKey, apiSecret } = await this.decryptCredentials(strategy);
 
