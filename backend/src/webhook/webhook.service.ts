@@ -117,7 +117,9 @@ export class WebhookService {
       const exchange = strategy.exchange || Exchange.BINANCE;
 
       if (exchange === Exchange.BYBIT) {
-        return await this.bybitClient.getWalletBalance(decryptedKey, decryptedSecret, strategy.isTestnet);
+        const balance = await this.bybitClient.getWalletBalance(decryptedKey, decryptedSecret, strategy.isTestnet);
+        this.logger.log(`[BALANCE] Bybit ${strategy.isTestnet ? 'Testnet' : 'Mainnet'}: ${balance.toFixed(2)} USDT`);
+        return balance;
       }
 
       if (strategy.isTestnet && exchange === Exchange.BINANCE) {
@@ -127,12 +129,59 @@ export class WebhookService {
         const queryString = `timestamp=${timestamp}`;
         const signature = crypto.createHmac('sha256', decryptedSecret).update(queryString).digest('hex');
 
+        this.logger.log(`[BALANCE] Fetching from: ${baseURL}${endpoint}`);
+        this.logger.debug(`[BALANCE] API Key: ${decryptedKey.substring(0, 8)}...`);
+
         const response = await axios.get(`${baseURL}${endpoint}?${queryString}&signature=${signature}`, {
           headers: { 'X-MBX-APIKEY': decryptedKey }
         });
 
+        this.logger.log(`[BALANCE] API Response received. Status: ${response.status}`);
+        this.logger.debug(`[BALANCE] Full response: ${JSON.stringify(response.data)}`);
+
+        if (!Array.isArray(response.data)) {
+          this.logger.error(`[BALANCE] ERROR: Response is not an array! Type: ${typeof response.data}, Value: ${JSON.stringify(response.data)}`);
+          throw new Error('Invalid balance response format from Binance');
+        }
+
+        this.logger.log(`[BALANCE] Found ${response.data.length} assets in balance`);
+
         const usdtBalance = response.data.find((b: any) => b.asset === 'USDT');
-        return parseFloat(usdtBalance?.availableBalance || '0');
+
+        if (!usdtBalance) {
+          const availableAssets = response.data.map((b: any) => `${b.asset}(${b.balance})`).join(', ');
+          this.logger.error(`[BALANCE] USDT not found! Available assets: ${availableAssets}`);
+          this.logger.error(`[BALANCE] Full asset list: ${JSON.stringify(response.data)}`);
+          throw new Error('USDT balance not found in account. Available assets: ' + availableAssets);
+        }
+
+        this.logger.debug(`[BALANCE] USDT object: ${JSON.stringify(usdtBalance)}`);
+
+        const availableBalance = parseFloat(usdtBalance.availableBalance || '0');
+        const walletBalance = parseFloat(usdtBalance.balance || '0');
+        const crossWalletBalance = parseFloat(usdtBalance.crossWalletBalance || '0');
+
+        this.logger.log(
+          `[BALANCE] Binance Testnet USDT: ` +
+          `Available=${availableBalance.toFixed(2)}, ` +
+          `Wallet=${walletBalance.toFixed(2)}, ` +
+          `Cross=${crossWalletBalance.toFixed(2)}`
+        );
+
+        const balance = availableBalance > 0 ? availableBalance : walletBalance;
+
+        if (balance === 0) {
+          this.logger.error(
+            `[BALANCE] CRITICAL: All USDT balances are 0! ` +
+            `This indicates either: ` +
+            `1) Account has no funds, ` +
+            `2) API key doesn't have permission to read balance, ` +
+            `3) Wrong account/environment. ` +
+            `Full USDT object: ${JSON.stringify(usdtBalance)}`
+          );
+        }
+
+        return balance;
       } else {
         const exchangeInstance = await this.exchangeService.getExchange(
           exchange,
@@ -141,12 +190,45 @@ export class WebhookService {
           strategy.isTestnet
         );
 
-        const balance = await exchangeInstance.fetchBalance();
-        return balance.free['USDT'] || 0;
+        const balanceData = await exchangeInstance.fetchBalance();
+        const balance = balanceData.free['USDT'] || 0;
+
+        this.logger.log(`[BALANCE] Binance Mainnet: ${balance.toFixed(2)} USDT`);
+
+        if (balance === 0) {
+          this.logger.warn(`[BALANCE] WARNING: Account balance is 0 USDT. This will cause notional errors.`);
+        }
+
+        return balance;
       }
-    } catch (error) {
-      this.logger.error(`Failed to fetch account balance: ${error.message}`);
-      return 0;
+    } catch (error: any) {
+      if (error.response) {
+        const errorCode = error.response.data?.code;
+        const errorMsg = error.response.data?.msg;
+        const statusCode = error.response.status;
+
+        this.logger.error(
+          `[BALANCE] API ERROR! ` +
+          `HTTP ${statusCode} | ` +
+          `Code: ${errorCode} | ` +
+          `Message: ${errorMsg} | ` +
+          `Full response: ${JSON.stringify(error.response.data)}`
+        );
+
+        if (errorCode === -2014) {
+          throw new Error('API key invalid or expired. Please check your API credentials.');
+        } else if (errorCode === -2015) {
+          throw new Error('API key has no permission to access balance. Please enable "Read" permission on your API key.');
+        } else if (errorCode === -1021) {
+          throw new Error('Timestamp error. Server time may be out of sync.');
+        } else {
+          throw new Error(`Binance API Error ${errorCode}: ${errorMsg}`);
+        }
+      } else {
+        this.logger.error(`[BALANCE] NETWORK/OTHER ERROR: ${error.message}`);
+        this.logger.error(`[BALANCE] Error stack: ${error.stack}`);
+        throw new Error(`Failed to fetch account balance: ${error.message}`);
+      }
     }
   }
 
@@ -416,6 +498,19 @@ export class WebhookService {
       throw new Error(`Strategy not found: ${signal.strategyId}`);
     }
 
+    this.logger.log(
+      `[STRATEGY CONFIG] ${strategy.name} | ` +
+      `Exchange: ${strategy.exchange || 'BINANCE'} | ` +
+      `Testnet: ${strategy.isTestnet} | ` +
+      `RealAccount: ${strategy.isRealAccount} | ` +
+      `UseAccountPercentage: ${strategy.useAccountPercentage} | ` +
+      `AccountPercentage: ${strategy.accountPercentage}% | ` +
+      `DefaultQuantity: ${strategy.defaultQuantity} | ` +
+      `Leverage: ${strategy.leverage}x | ` +
+      `EnableCompound: ${strategy.enableCompound} | ` +
+      `TradingMode: ${strategy.tradingMode}`
+    );
+
     if (!strategy.isActive) {
       this.logger.warn(`Strategy ${strategy.name} is paused. Ignoring signal.`);
       return { status: 'skipped', message: 'Strategy is paused' };
@@ -559,60 +654,77 @@ export class WebhookService {
     let quantity: number;
     let notional = 0;
 
+    this.logger.log(`[QUANTITY CALC] Starting calculation - signal.quantity: ${signal.quantity}, signal.accountPercentage: ${signal.accountPercentage}, strategy.useAccountPercentage: ${strategy.useAccountPercentage}, strategy.accountPercentage: ${strategy.accountPercentage}, effectivePrice: ${effectivePrice}`);
+
     if (signal.quantity) {
       quantity = signal.quantity;
       notional = quantity * effectivePrice!;
-      this.logger.log(`Using explicit quantity from signal: ${this.formatQuantityWithUsdt(quantity, effectivePrice!)}`);
+      this.logger.log(`[QUANTITY CALC] Using explicit quantity from signal: ${this.formatQuantityWithUsdt(quantity, effectivePrice!)}`);
     } else if (signal.accountPercentage && effectivePrice) {
       const accountBalance = await this.getAccountBalance(strategy);
-      this.logger.log(`[DEBUG] Fetched Account Balance: ${accountBalance.toFixed(2)} USDT`);
-      
+      this.logger.log(`[QUANTITY CALC] Signal percentage mode - Balance: ${accountBalance.toFixed(2)} USDT, Percentage: ${signal.accountPercentage}%`);
+
       const targetNotional = accountBalance * (signal.accountPercentage / 100);
       quantity = targetNotional / effectivePrice;
       notional = targetNotional;
-      
-      this.logger.log(`Calculated quantity from ${signal.accountPercentage}% of balance: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
+
+      this.logger.log(`[QUANTITY CALC] Result - Notional: ${notional.toFixed(2)} USDT, Quantity: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
     } else if (strategy.useAccountPercentage && strategy.accountPercentage && effectivePrice) {
+      this.logger.log(`[QUANTITY CALC] Strategy percentage mode - enableCompound: ${strategy.enableCompound}`);
+
       if (!strategy.enableCompound) {
         const lastTradeWithQty = await this.tradesService.findLastTradeWithInitialQuantity(strategy.id);
         if (lastTradeWithQty && lastTradeWithQty.initialQuantity) {
           quantity = parseFloat(lastTradeWithQty.initialQuantity as any);
           notional = quantity * effectivePrice;
-          this.logger.log(`[COMPOUND OFF] Using fixed quantity from first trade: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
+          this.logger.log(`[COMPOUND OFF] Using fixed quantity from first trade: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}, Notional: ${notional.toFixed(2)} USDT`);
         } else {
           const accountBalance = await this.getAccountBalance(strategy);
-          this.logger.log(`[DEBUG] Fetched Account Balance: ${accountBalance.toFixed(2)} USDT`);
+          this.logger.log(`[COMPOUND OFF] First trade - Balance: ${accountBalance.toFixed(2)} USDT, Percentage: ${strategy.accountPercentage}%`);
 
           const targetNotional = accountBalance * (strategy.accountPercentage / 100);
           quantity = targetNotional / effectivePrice;
           notional = targetNotional;
 
-          this.logger.log(`[COMPOUND OFF] First trade - calculating initial quantity from ${strategy.accountPercentage}% of balance: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
+          this.logger.log(`[COMPOUND OFF] First trade result - Notional: ${notional.toFixed(2)} USDT, Quantity: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
         }
       } else {
         const accountBalance = await this.getAccountBalance(strategy);
-        this.logger.log(`[DEBUG] Fetched Account Balance: ${accountBalance.toFixed(2)} USDT`);
+        this.logger.log(`[COMPOUND ON] Balance: ${accountBalance.toFixed(2)} USDT, Percentage: ${strategy.accountPercentage}%`);
 
         const targetNotional = accountBalance * (strategy.accountPercentage / 100);
         quantity = targetNotional / effectivePrice;
         notional = targetNotional;
 
-        this.logger.log(`[COMPOUND ON] Calculated quantity from strategy ${strategy.accountPercentage}% of balance: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
+        this.logger.log(`[COMPOUND ON] Result - Notional: ${notional.toFixed(2)} USDT, Quantity: ${this.formatQuantityWithUsdt(quantity, effectivePrice)}`);
       }
     } else {
       quantity = strategy.defaultQuantity || 0.002;
-      notional = quantity * (effectivePrice || 0); // fallback if effectivePrice undefined
-      this.logger.log(`Using default quantity from strategy: ${this.formatQuantityWithUsdt(quantity, effectivePrice || 0)}`);
+      notional = quantity * (effectivePrice || 0);
+      this.logger.log(`[QUANTITY CALC] Using default quantity from strategy: ${this.formatQuantityWithUsdt(quantity, effectivePrice || 0)}, Notional: ${notional.toFixed(2)} USDT`);
     }
+
+    this.logger.log(`[QUANTITY CALC] FINAL VALUES - Quantity: ${quantity.toFixed(6)}, Notional: ${notional.toFixed(2)} USDT, Leverage: ${strategy.leverage}x`);
 
     if (notional < 5) {
-       this.logger.warn(`[WARNING] Calculated notional (${notional}) is extremely low. Binance Minimum is usually 5-10 USDT (100 on some pairs/testnet).`);
+       this.logger.warn(
+         `[WARNING] Calculated notional (${notional.toFixed(2)} USDT) is extremely low. ` +
+         `Binance Minimum is usually 5-10 USDT (100 on some pairs/testnet). ` +
+         `DEBUG: quantity=${quantity.toFixed(6)}, price=${effectivePrice}, ` +
+         `useAccountPercentage=${strategy.useAccountPercentage}, accountPercentage=${strategy.accountPercentage}%`
+       );
     }
 
-    if (notional < 10) { // Binance Min is typically 5-10, Testnet can be higher (100+)
-       const msg = `[WARNING] Calculated notional (${notional.toFixed(2)} USDT) is too low. Trade aborted to avoid rejection.`;
-       this.logger.warn(msg);
-       
+    if (notional < 10) {
+       this.logger.error(
+         `[NOTIONAL ERROR] Trade REJECTED - Notional too low! ` +
+         `Calculated: ${notional.toFixed(2)} USDT | Minimum Required: 10 USDT | ` +
+         `Symbol: ${normalizedSymbol} | Side: ${side} | ` +
+         `Quantity: ${quantity.toFixed(6)} | Price: ${effectivePrice} | Leverage: ${strategy.leverage}x | ` +
+         `Strategy Config: useAccountPercentage=${strategy.useAccountPercentage}, accountPercentage=${strategy.accountPercentage}%, ` +
+         `enableCompound=${strategy.enableCompound}, isTestnet=${strategy.isTestnet}`
+       );
+
        const tradeData: Partial<Trade> = {
           strategyId: strategy.id,
           symbol: normalizedSymbol,
@@ -621,10 +733,14 @@ export class WebhookService {
           entryPrice: effectivePrice,
           quantity,
           status: 'ERROR',
-          error: 'Notional too low (< 10 USDT)',
+          error: `Notional too low: ${notional.toFixed(2)} USDT (min 10 USDT). Check account balance and strategy settings.`,
        };
        await this.tradesService.create(tradeData);
-       return { status: 'error', message: msg };
+
+       return {
+         status: 'error',
+         message: `Notional too low: ${notional.toFixed(2)} USDT. Minimum required: 10 USDT. Check account balance and percentage settings.`
+       };
     }
 
     const isAveragingTrade = activeTrade && strategy.allowAveraging;
