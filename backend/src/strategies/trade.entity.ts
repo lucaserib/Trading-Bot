@@ -62,6 +62,9 @@ export class Trade {
   @Column({ default: false })
   isFromAveraging: boolean;
 
+  @Column({ type: 'int', default: 0 })
+  lastTpLevel: number;
+
   @Column("decimal", { precision: 18, scale: 8, nullable: true })
   initialQuantity: number | null;
 

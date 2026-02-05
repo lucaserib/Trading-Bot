@@ -280,9 +280,26 @@ export class WebhookService {
     marginMode: MarginMode,
     apiKey: string,
     apiSecret: string,
-    isTestnet: boolean
+    isTestnet: boolean,
+    hedgeMode: boolean = false
   ): Promise<void> {
     const baseURL = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
+
+    try {
+      const dualTimestamp = Date.now();
+      const dualQueryString = `dualSidePositionMode=${hedgeMode}&timestamp=${dualTimestamp}`;
+      const dualSignature = crypto.createHmac('sha256', apiSecret).update(dualQueryString).digest('hex');
+      await axios.post(
+        `${baseURL}/fapi/v1/positionSide/dual`,
+        `${dualQueryString}&signature=${dualSignature}`,
+        { headers: { 'X-MBX-APIKEY': apiKey, 'Content-Type': 'application/x-www-form-urlencoded' } }
+      );
+      this.logger.log(`[BINANCE] Position mode set to ${hedgeMode ? 'Hedge' : 'One-Way'}`);
+    } catch (error: any) {
+      if (error.response?.data?.code !== -4300) {
+        this.logger.warn(`[BINANCE] Failed to set position mode: ${error.response?.data?.msg || error.message}`);
+      }
+    }
 
     try {
       const marginTimestamp = Date.now();
@@ -398,7 +415,8 @@ export class WebhookService {
     stopPrice: number,
     apiKey: string,
     apiSecret: string,
-    isTestnet: boolean
+    isTestnet: boolean,
+    hedgeMode: boolean = false
   ): Promise<string | null> {
     try {
       const closeSide = side === 'BUY' ? 'SELL' : 'BUY';
@@ -408,9 +426,14 @@ export class WebhookService {
       params.append('side', closeSide);
       params.append('type', 'STOP_MARKET');
       const rules = await this.getSymbolRules(symbol, isTestnet);
-      params.append('quantity', this.normalizeQuantity(quantity, rules.qtyStep, rules.minQty));
+      if (hedgeMode) {
+        params.append('positionSide', side === 'BUY' ? 'LONG' : 'SHORT');
+        params.append('quantity', this.normalizeQuantity(quantity, rules.qtyStep, rules.minQty));
+      } else {
+        params.append('quantity', '0');
+        params.append('closePosition', 'true');
+      }
       params.append('stopPrice', this.roundTick(stopPrice, rules.priceTick));
-      params.append('closePosition', 'false');
       params.append('workingType', 'MARK_PRICE');
 
       const response = await this.createBinanceOrder(params, apiKey, apiSecret, isTestnet);
@@ -430,7 +453,8 @@ export class WebhookService {
     takeProfitPrice: number,
     apiKey: string,
     apiSecret: string,
-    isTestnet: boolean
+    isTestnet: boolean,
+    hedgeMode: boolean = false
   ): Promise<string | null> {
     try {
       const closeSide = side === 'BUY' ? 'SELL' : 'BUY';
@@ -442,8 +466,12 @@ export class WebhookService {
       const rules = await this.getSymbolRules(symbol, isTestnet);
       params.append('quantity', this.normalizeQuantity(quantity, rules.qtyStep, rules.minQty));
       params.append('stopPrice', this.roundTick(takeProfitPrice, rules.priceTick));
-      params.append('reduceOnly', 'true');
       params.append('workingType', 'MARK_PRICE');
+      if (hedgeMode) {
+        params.append('positionSide', side === 'BUY' ? 'LONG' : 'SHORT');
+      } else {
+        params.append('reduceOnly', 'true');
+      }
 
       const response = await this.createBinanceOrder(params, apiKey, apiSecret, isTestnet);
 
@@ -816,7 +844,8 @@ export class WebhookService {
           strategy.marginMode || MarginMode.ISOLATED,
           decryptedKey,
           decryptedSecret,
-          strategy.isTestnet
+          strategy.isTestnet,
+          strategy.hedgeMode
         );
 
         tradeDetails = await this.executeBinanceOrder(
@@ -834,6 +863,8 @@ export class WebhookService {
       const entryPrice = tradeDetails.average || tradeDetails.price || signal.price;
       tradeData.entryPrice = entryPrice;
       tradeData.exchangeOrderId = tradeDetails.id;
+
+      await new Promise(r => setTimeout(r, 1500));
 
       // --- STOP LOSS ---
       let stopLossPrice: number | null = null;
@@ -857,7 +888,7 @@ export class WebhookService {
              );
           } else {
              stopLossOrderId = await this.createBinanceStopLossOrder(
-                normalizedSymbol, side, quantity, stopLossPrice, decryptedKey, decryptedSecret, strategy.isTestnet
+                normalizedSymbol, side, quantity, stopLossPrice, decryptedKey, decryptedSecret, strategy.isTestnet, strategy.hedgeMode
              );
           }
       }
@@ -869,24 +900,25 @@ export class WebhookService {
           { percent: strategy.takeProfitPercentage3, qtyPercent: strategy.takeProfitQuantity3 || 34, id: 3 },
       ];
 
+      const tpOrderIds: string[] = [];
+
       for (const tp of tpConfigs) {
           if (tp.percent && tp.percent > 0) {
               const tpPrice = this.calculateTakeProfitPrice(side, entryPrice, tp.percent);
               const tpQty = (quantity * tp.qtyPercent) / 100;
-              
+
               if (tpQty <= 0) continue;
 
               this.logger.log(`[TP${tp.id}] Placing partial TP at ${tpPrice.toFixed(2)} for ${this.formatQuantityWithUsdt(tpQty, tpPrice)} (${tp.qtyPercent}%)`);
-              
+
               const rules = await this.getSymbolRules(normalizedSymbol, strategy.isTestnet);
 
               if (exchange === Exchange.BYBIT) {
-                 // Bybit partial TP usually requires Limit Reduce-Only orders rather than a single TP attached to position
                    await this.bybitClient.createOrder(
                       decryptedKey, decryptedSecret, strategy.isTestnet,
                       {
                           symbol: normalizedSymbol,
-                          side: side === 'BUY' ? 'Sell' : 'Buy', // Close side
+                          side: side === 'BUY' ? 'Sell' : 'Buy',
                           orderType: 'Limit',
                           qty: this.normalizeQuantity(tpQty, rules.qtyStep, rules.minQty),
                           price: this.roundTick(tpPrice, rules.priceTick),
@@ -894,19 +926,27 @@ export class WebhookService {
                       }
                   );
               } else {
-                  // Binance Partial TP
-                  await this.createBinanceTakeProfitOrder(
-                      normalizedSymbol, side, tpQty, tpPrice, decryptedKey, decryptedSecret, strategy.isTestnet
+                  const tpOrderId = await this.createBinanceTakeProfitOrder(
+                      normalizedSymbol, side, tpQty, tpPrice, decryptedKey, decryptedSecret, strategy.isTestnet, strategy.hedgeMode
                   );
+                  if (tpOrderId) {
+                    tpOrderIds.push(`${tp.id}:${tpOrderId}`);
+                  } else {
+                    this.logger.warn(`[TP${tp.id}] Failed to place exchange TP order — will rely on manual monitoring`);
+                  }
               }
           }
+      }
+
+      if (tpOrderIds.length > 0) {
+        takeProfitOrderId = tpOrderIds.join('|');
       }
 
       await this.tradesService.updateTrade(savedTrade.id, {
         entryPrice: tradeData.entryPrice,
         exchangeOrderId: tradeData.exchangeOrderId,
         stopLossOrderId: stopLossOrderId || undefined,
-        // takeProfitOrderId field might need deprecating or storing array. For now we leave last or empty.
+        takeProfitOrderId: takeProfitOrderId || undefined,
       });
 
       this.logger.log(`[TRADE] Updated trade ${savedTrade.id} with order details`);

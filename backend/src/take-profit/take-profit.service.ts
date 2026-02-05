@@ -53,44 +53,27 @@ export class TakeProfitService {
     const apiKey = (await EncryptionUtil.decrypt(strategy.apiKey)).trim();
     const apiSecret = (await EncryptionUtil.decrypt(strategy.apiSecret)).trim();
 
-    if (trade.takeProfitOrderId && trade.takeProfitOrderId.trim() !== '') {
-      if (trade.takeProfitOrderId.startsWith('BYBIT_TRADING_STOP')) {
-        const positions = await this.bybitClient.getPositions(apiKey, apiSecret, strategy.isTestnet, trade.symbol);
-        const position = positions.find(p =>
-          p.symbol === trade.symbol &&
-          ((trade.side === 'BUY' && p.side === 'Buy') || (trade.side === 'SELL' && p.side === 'Sell'))
-        );
-
-        if (!position || parseFloat(position.size) === 0) {
-          this.logger.log(`[TAKE PROFIT EXECUTED] ${trade.symbol} - Position closed on Bybit`);
-          await this.markTradeAsClosed(trade, 'TAKE_PROFIT', exchange, apiKey, apiSecret, strategy.isTestnet);
-          return;
-        }
-        return;
-      }
-
-      const orderStatus = await this.checkOrderStatus(
-        trade.takeProfitOrderId,
-        trade.symbol,
-        exchange,
-        apiKey,
-        apiSecret,
-        strategy.isTestnet
+    // --- Bybit trading stop (position-level, no manual monitoring needed) ---
+    if (trade.takeProfitOrderId && trade.takeProfitOrderId.startsWith('BYBIT_TRADING_STOP')) {
+      const positions = await this.bybitClient.getPositions(apiKey, apiSecret, strategy.isTestnet, trade.symbol);
+      const position = positions.find(p =>
+        p.symbol === trade.symbol &&
+        ((trade.side === 'BUY' && p.side === 'Buy') || (trade.side === 'SELL' && p.side === 'Sell'))
       );
-
-      if (orderStatus === 'FILLED' || orderStatus === 'Filled') {
-        this.logger.log(`[TAKE PROFIT EXECUTED] ${trade.symbol} - Order was filled`);
+      if (!position || parseFloat(position.size) === 0) {
+        this.logger.log(`[TAKE PROFIT EXECUTED] ${trade.symbol} - Position closed on Bybit`);
         await this.markTradeAsClosed(trade, 'TAKE_PROFIT', exchange, apiKey, apiSecret, strategy.isTestnet);
-        return;
-      } else if (orderStatus === 'CANCELED' || orderStatus === 'EXPIRED' || orderStatus === 'Cancelled' || orderStatus === 'Deactivated') {
-        this.logger.warn(`[TAKE PROFIT] Order ${trade.takeProfitOrderId} was ${orderStatus}, falling back to manual monitoring`);
-        trade.takeProfitOrderId = null;
-        await this.tradesRepository.save(trade);
-      } else if (orderStatus === 'NEW' || orderStatus === 'New') {
-        return;
       }
+      return;
     }
 
+    // --- Exchange TP orders tracking (pipe-delimited: "1:orderId|2:orderId|3:orderId") ---
+    if (trade.takeProfitOrderId && trade.takeProfitOrderId.includes(':')) {
+      await this.checkExchangeTakeProfit(trade, strategy, exchange, apiKey, apiSecret);
+      return;
+    }
+
+    // --- Manual price-based TP monitoring (fallback when exchange orders not placed) ---
     const currentPrice = await this.getCurrentPrice(trade, strategy);
     if (!currentPrice) return;
 
@@ -100,23 +83,130 @@ export class TakeProfitService {
 
     if (!tp1 && !tp2 && !tp3) return;
 
-    const profitPercent = this.calculateProfitPercent(trade, currentPrice);
+    const tp1Qty = strategy.takeProfitQuantity1 || 33;
+    const tp2Qty = strategy.takeProfitQuantity2 || 33;
+    const lastTpLevel = trade.lastTpLevel || 0;
 
-    if (tp3 && this.shouldTrigger(trade, currentPrice, tp3)) {
-      const entryPrice = parseFloat(trade.entryPrice as any);
-      this.logger.log(`[TAKE-PROFIT 3 HIT] ${trade.symbol}`);
-      this.logger.log(`├─ Entry: ${entryPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)} (${profitPercent > 0 ? '+' : ''}${profitPercent.toFixed(2)}%)`);
-      await this.closePosition(trade, strategy, currentPrice, 'TAKE_PROFIT_3', 1.0);
-    } else if (tp2 && this.shouldTrigger(trade, currentPrice, tp2)) {
-      const entryPrice = parseFloat(trade.entryPrice as any);
-      this.logger.log(`[TAKE-PROFIT 2 HIT] ${trade.symbol}`);
-      this.logger.log(`├─ Entry: ${entryPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)} (${profitPercent > 0 ? '+' : ''}${profitPercent.toFixed(2)}%)`);
-      await this.closePosition(trade, strategy, currentPrice, 'TAKE_PROFIT_2', 0.5);
-    } else if (tp1 && this.shouldTrigger(trade, currentPrice, tp1)) {
-      const entryPrice = parseFloat(trade.entryPrice as any);
+    const profitPercent = this.calculateProfitPercent(trade, currentPrice);
+    const entryPrice = parseFloat(trade.entryPrice as any);
+
+    if (lastTpLevel < 1 && tp1 && this.shouldTrigger(trade, currentPrice, tp1)) {
       this.logger.log(`[TAKE-PROFIT 1 HIT] ${trade.symbol}`);
       this.logger.log(`├─ Entry: ${entryPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)} (${profitPercent > 0 ? '+' : ''}${profitPercent.toFixed(2)}%)`);
-      await this.closePosition(trade, strategy, currentPrice, 'TAKE_PROFIT_1', 0.33);
+      trade.lastTpLevel = 1;
+      await this.closePosition(trade, strategy, currentPrice, 'TAKE_PROFIT_1', tp1Qty / 100);
+    } else if (lastTpLevel < 2 && tp2 && this.shouldTrigger(trade, currentPrice, tp2)) {
+      const closePercent = tp2Qty / (100 - tp1Qty);
+      this.logger.log(`[TAKE-PROFIT 2 HIT] ${trade.symbol}`);
+      this.logger.log(`├─ Entry: ${entryPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)} (${profitPercent > 0 ? '+' : ''}${profitPercent.toFixed(2)}%)`);
+      trade.lastTpLevel = 2;
+      await this.closePosition(trade, strategy, currentPrice, 'TAKE_PROFIT_2', closePercent);
+    } else if (lastTpLevel < 3 && tp3 && this.shouldTrigger(trade, currentPrice, tp3)) {
+      this.logger.log(`[TAKE-PROFIT 3 HIT] ${trade.symbol}`);
+      this.logger.log(`├─ Entry: ${entryPrice.toFixed(2)} → Exit: ${currentPrice.toFixed(2)} (${profitPercent > 0 ? '+' : ''}${profitPercent.toFixed(2)}%)`);
+      trade.lastTpLevel = 3;
+      await this.closePosition(trade, strategy, currentPrice, 'TAKE_PROFIT_3', 1.0);
+    }
+  }
+
+  private async checkExchangeTakeProfit(trade: Trade, strategy: any, exchange: Exchange, apiKey: string, apiSecret: string) {
+    const entries = trade.takeProfitOrderId!.split('|');
+    const tp1Qty = strategy.takeProfitQuantity1 || 33;
+    const tp2Qty = strategy.takeProfitQuantity2 || 33;
+
+    const filledLevels = new Set<number>();
+    let anyActive = false;
+    let allDone = true;
+
+    for (const entry of entries) {
+      const [levelStr, orderId] = entry.split(':');
+      const level = parseInt(levelStr);
+
+      if ((trade.lastTpLevel || 0) >= level) {
+        filledLevels.add(level);
+        continue;
+      }
+
+      const status = await this.checkOrderStatus(orderId, trade.symbol, exchange, apiKey, apiSecret, strategy.isTestnet);
+
+      if (status === 'FILLED' || status === 'Filled') {
+        filledLevels.add(level);
+        this.logger.log(`[TP${level}] Exchange order filled for ${trade.symbol} (orderId: ${orderId})`);
+      } else if (status === 'NEW' || status === 'New') {
+        anyActive = true;
+        allDone = false;
+      } else if (status === 'CANCELED' || status === 'EXPIRED' || status === 'Cancelled' || status === 'Deactivated') {
+        this.logger.warn(`[TP${level}] Exchange order ${orderId} was ${status}`);
+      } else {
+        allDone = false;
+      }
+    }
+
+    // Determine newly filled levels (not yet processed)
+    const newlyFilled: number[] = [];
+    for (const level of [1, 2, 3]) {
+      if (filledLevels.has(level) && (trade.lastTpLevel || 0) < level) {
+        newlyFilled.push(level);
+      }
+    }
+
+    if (newlyFilled.length > 0) {
+      const currentPrice = await this.getCurrentPrice(trade, strategy);
+      let newQty = parseFloat(trade.quantity as any);
+      let accumulatedPnl = parseFloat(trade.pnl as any) || 0;
+      const entryPrice = parseFloat(trade.entryPrice as any);
+      let highestProcessed = trade.lastTpLevel || 0;
+
+      for (const l of newlyFilled) {
+        const pct = l === 1 ? tp1Qty : l === 2 ? tp2Qty : (strategy.takeProfitQuantity3 || 34);
+        const tpPrice = this.calculateTakeProfit(trade, strategy, l);
+
+        // closePercent is relative to current remaining quantity
+        // Each TP was placed with a fixed quantity = initial * pct / 100
+        // But since we track via remaining qty, use: closedQty = newQty * (pct / sumOfUnprocessedPcts)
+        const sumRemaining = [1, 2, 3]
+          .filter(lvl => !filledLevels.has(lvl) || lvl > highestProcessed)
+          .filter(lvl => lvl >= l)
+          .reduce((sum, lvl) => sum + (lvl === 1 ? tp1Qty : lvl === 2 ? tp2Qty : (strategy.takeProfitQuantity3 || 34)), 0);
+        const closePercent = sumRemaining > 0 ? pct / sumRemaining : pct / 100;
+        const closedQty = newQty * closePercent;
+        const fillPrice = tpPrice || currentPrice;
+        const pnl = trade.side === 'BUY' ? (fillPrice - entryPrice) * closedQty : (entryPrice - fillPrice) * closedQty;
+        accumulatedPnl += pnl;
+        newQty -= closedQty;
+        highestProcessed = l;
+
+        this.logger.log(`├─ TP${l} closed: ${this.formatQuantityWithUsdt(closedQty, fillPrice)} | P&L: ${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDT`);
+      }
+
+      const allConfiguredFilled = entries.every(e => filledLevels.has(parseInt(e.split(':')[0])));
+
+      if (allConfiguredFilled || newQty <= 0.0001) {
+        trade.status = 'CLOSED';
+        trade.exitPrice = currentPrice as any;
+        trade.pnl = accumulatedPnl as any;
+        trade.closeReason = `TAKE_PROFIT_${highestProcessed}` as any;
+        trade.closedAt = new Date();
+        trade.binancePositionAmt = 0 as any;
+        trade.lastTpLevel = highestProcessed;
+        await this.tradesRepository.save(trade);
+        this.logger.log(`└─ Trade fully closed via TP${highestProcessed} | Total P&L: ${accumulatedPnl > 0 ? '+' : ''}${accumulatedPnl.toFixed(2)} USDT`);
+      } else {
+        trade.quantity = newQty as any;
+        trade.lastTpLevel = highestProcessed;
+        trade.pnl = accumulatedPnl as any;
+        trade.binancePositionAmt = newQty as any;
+        await this.tradesRepository.save(trade);
+        this.logger.log(`├─ Remaining: ${this.formatQuantityWithUsdt(newQty, currentPrice)}`);
+      }
+      return;
+    }
+
+    // All remaining orders cancelled/expired and no new fills — fall back to manual monitoring
+    if (allDone && !anyActive) {
+      this.logger.warn(`[TP] All exchange TP orders inactive for ${trade.symbol}, switching to manual monitoring`);
+      trade.takeProfitOrderId = null;
+      await this.tradesRepository.save(trade);
     }
   }
 
@@ -168,17 +258,18 @@ export class TakeProfitService {
     const currentPrice = exitPrice || await this.getCurrentPrice(trade, { exchange, isTestnet } as any);
 
     const pnl = this.calculatePnL(trade, currentPrice, 1.0);
+    const totalPnl = (parseFloat(trade.pnl as any) || 0) + pnl;
 
     trade.status = 'CLOSED';
     trade.exitPrice = currentPrice as any;
-    trade.pnl = pnl as any;
+    trade.pnl = totalPnl as any;
     trade.closeReason = reason;
     trade.closedAt = new Date();
     trade.binancePositionAmt = 0 as any;
 
     await this.tradesRepository.save(trade);
 
-    this.logger.log(`[CLOSED] ${trade.symbol} via ${reason} | P&L: ${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDT`);
+    this.logger.log(`[CLOSED] ${trade.symbol} via ${reason} | P&L: ${totalPnl > 0 ? '+' : ''}${totalPnl.toFixed(2)} USDT`);
   }
 
   private async getLastTradePrice(

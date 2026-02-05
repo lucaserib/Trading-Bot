@@ -504,7 +504,9 @@ export class PositionSyncService {
       trade.side = position.side;
     }
 
-    trade.pnl = position.unrealizedPnl as any;
+    if (!(trade.lastTpLevel || 0)) {
+      trade.pnl = position.unrealizedPnl as any;
+    }
     trade.binancePositionAmt = position.size as any;
     trade.quantity = position.size as any;
     trade.entryPrice = position.entryPrice as any;

@@ -162,18 +162,30 @@ export class StopLossService {
     const exitPrice = await this.getLastTradePrice(trade.symbol, exchange, apiKey, apiSecret, isTestnet);
     const currentPrice = exitPrice || await this.getCurrentPrice(trade, { exchange, isTestnet } as any);
 
+    // Cancel any remaining exchange orders
+    try {
+      if (exchange === Exchange.BYBIT) {
+        await this.bybitClient.cancelAllOrders(apiKey, apiSecret, isTestnet, trade.symbol);
+      } else {
+        await this.cancelAllBinanceOrders(apiKey, apiSecret, isTestnet, trade.symbol);
+      }
+    } catch (e) {
+      this.logger.warn(`[SL] Failed to cancel open orders on ${trade.symbol}: ${e.message}`);
+    }
+
     const pnl = this.calculatePnL(trade, currentPrice);
+    const totalPnl = (parseFloat(trade.pnl as any) || 0) + pnl;
 
     trade.status = 'CLOSED';
     trade.exitPrice = currentPrice as any;
-    trade.pnl = pnl;
+    trade.pnl = totalPnl;
     trade.closeReason = reason;
     trade.closedAt = new Date();
     trade.binancePositionAmt = 0 as any;
 
     await this.tradesRepository.save(trade);
 
-    this.logger.log(`[CLOSED] ${trade.symbol} via ${reason} | P&L: ${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDT`);
+    this.logger.log(`[CLOSED] ${trade.symbol} via ${reason} | P&L: ${totalPnl > 0 ? '+' : ''}${totalPnl.toFixed(2)} USDT`);
   }
 
   private async getLastTradePrice(
@@ -309,22 +321,46 @@ export class StopLossService {
         this.logger.warn(`[CLOSED] ${trade.symbol} via ${reason}`);
       }
 
+      // Cancel any remaining exchange TP orders
+      try {
+        if (exchange === Exchange.BYBIT) {
+          await this.bybitClient.cancelAllOrders(apiKey, apiSecret, strategy.isTestnet, trade.symbol);
+        } else {
+          await this.cancelAllBinanceOrders(apiKey, apiSecret, strategy.isTestnet, trade.symbol);
+        }
+      } catch (e) {
+        this.logger.warn(`[SL] Failed to cancel open orders on ${trade.symbol}: ${e.message}`);
+      }
+
       const pnl = this.calculatePnL(trade, exitPrice);
+      const totalPnl = (parseFloat(trade.pnl as any) || 0) + pnl;
 
       trade.status = 'CLOSED';
       trade.exitPrice = exitPrice as any;
-      trade.pnl = pnl;
+      trade.pnl = totalPnl;
       trade.closeReason = reason;
       trade.closedAt = new Date();
       trade.binancePositionAmt = 0 as any;
 
       await this.tradesRepository.save(trade);
 
-      this.logger.warn(`└─ Closed: ${this.formatQuantityWithUsdt(quantity, exitPrice)} | P&L: ${pnl > 0 ? '+' : ''}${pnl.toFixed(2)} USDT`);
+      this.logger.warn(`└─ Closed: ${this.formatQuantityWithUsdt(quantity, exitPrice)} | P&L: ${totalPnl > 0 ? '+' : ''}${totalPnl.toFixed(2)} USDT`);
 
     } catch (error) {
       this.logger.error(`Failed to close position: ${error.message}`);
     }
+  }
+
+  private async cancelAllBinanceOrders(apiKey: string, apiSecret: string, isTestnet: boolean, symbol: string): Promise<void> {
+    const baseURL = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
+    const params = new URLSearchParams();
+    params.append('symbol', symbol);
+    params.append('timestamp', Date.now().toString());
+    const queryString = params.toString();
+    const signature = crypto.createHmac('sha256', apiSecret).update(queryString).digest('hex');
+    await axios.delete(`${baseURL}/fapi/v1/allOpenOrders?${queryString}&signature=${signature}`, {
+      headers: { 'X-MBX-APIKEY': apiKey }
+    });
   }
 
   private calculatePnL(trade: Trade, exitPrice: number): number {
