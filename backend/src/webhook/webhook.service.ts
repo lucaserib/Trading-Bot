@@ -22,6 +22,52 @@ interface BinanceOrderResponse {
   side: string;
 }
 
+// Custom error classes for trading operations
+class StopLossCreationError extends Error {
+  constructor(
+    public symbol: string,
+    public errorCode: number,
+    public errorMessage: string,
+    public originalError: any
+  ) {
+    super(`Failed to create Stop Loss for ${symbol}: [${errorCode}] ${errorMessage}`);
+    this.name = 'StopLossCreationError';
+  }
+}
+
+class TakeProfitCreationError extends Error {
+  constructor(
+    public symbol: string,
+    public errorCode: number,
+    public errorMessage: string,
+    public originalError: any
+  ) {
+    super(`Failed to create Take Profit for ${symbol}: [${errorCode}] ${errorMessage}`);
+    this.name = 'TakeProfitCreationError';
+  }
+}
+
+class PositionNotFoundError extends Error {
+  constructor(
+    public symbol: string,
+    public positionSide?: string
+  ) {
+    super(`Position not found for ${symbol}${positionSide ? ` (${positionSide})` : ''}`);
+    this.name = 'PositionNotFoundError';
+  }
+}
+
+class PositionProtectionError extends Error {
+  constructor(
+    public message: string,
+    public entryOrderId: string,
+    public symbol: string
+  ) {
+    super(message);
+    this.name = 'PositionProtectionError';
+  }
+}
+
 @Injectable()
 export class WebhookService {
   private readonly logger = new Logger(WebhookService.name);
@@ -85,17 +131,48 @@ export class WebhookService {
     const dValue = new Decimal(value);
     const dStep = new Decimal(step);
     const dMinQty = new Decimal(minQty);
-    
-    // 1. Round down to nearest step
-    let rounded = dValue.div(dStep).floor().mul(dStep);
 
-    // 2. Ensure it meets minimum quantity
-    if (rounded.lessThan(dMinQty)) {
-        this.logger.warn(`[RISK] Calculated quantity ${dValue.toFixed()} is below minQty ${minQty}. Adjusting to ${minQty}.`);
-        return dMinQty.toFixed();
+    // 1. Check if input value is already zero or negative
+    if (dValue.lessThanOrEqualTo(0)) {
+      this.logger.error(
+        `[QUANTITY] INVALID - Input quantity is zero or negative\n` +
+        `  Input Value: ${value}\n` +
+        `  Step: ${step}\n` +
+        `  Min Quantity: ${minQty}\n` +
+        `  This will cause order creation to fail!`
+      );
+      throw new Error(`Invalid quantity: ${value}. Quantity must be greater than zero.`);
     }
 
-    return rounded.toFixed(); 
+    // 2. Round down to nearest step
+    let rounded = dValue.div(dStep).floor().mul(dStep);
+
+    // 3. Check if rounding resulted in zero
+    if (rounded.isZero()) {
+      this.logger.error(
+        `[QUANTITY] ZERO AFTER ROUNDING\n` +
+        `  Original Value: ${value}\n` +
+        `  Step Size: ${step}\n` +
+        `  Min Quantity: ${minQty}\n` +
+        `  Rounded Value: 0\n` +
+        `  The quantity is too small for this symbol's step size!\n` +
+        `  Attempting to use minimum quantity instead...`
+      );
+      rounded = dMinQty;
+    }
+
+    // 4. Ensure it meets minimum quantity
+    if (rounded.lessThan(dMinQty)) {
+      this.logger.warn(
+        `[QUANTITY] Below minimum - Adjusting\n` +
+        `  Calculated: ${rounded.toFixed()}\n` +
+        `  Minimum: ${minQty}\n` +
+        `  Using minimum quantity`
+      );
+      return dMinQty.toFixed();
+    }
+
+    return rounded.toFixed();
   }
 
   private roundTick(value: number, tick: string): string {
@@ -289,15 +366,58 @@ export class WebhookService {
       const dualTimestamp = Date.now();
       const dualQueryString = `dualSidePositionMode=${hedgeMode}&timestamp=${dualTimestamp}`;
       const dualSignature = crypto.createHmac('sha256', apiSecret).update(dualQueryString).digest('hex');
+
+      this.logger.log(`[POSITION MODE] BEFORE API CALL - Setting hedge mode: ${hedgeMode}, URL: ${baseURL}/fapi/v1/positionSide/dual`);
+      this.logger.debug(`[POSITION MODE] Request params: ${dualQueryString}`);
+
       await axios.post(
         `${baseURL}/fapi/v1/positionSide/dual`,
         `${dualQueryString}&signature=${dualSignature}`,
         { headers: { 'X-MBX-APIKEY': apiKey, 'Content-Type': 'application/x-www-form-urlencoded' } }
       );
-      this.logger.log(`[BINANCE] Position mode set to ${hedgeMode ? 'Hedge' : 'One-Way'}`);
+
+      this.logger.log(`[POSITION MODE] SUCCESS - Position mode set to ${hedgeMode ? 'Hedge' : 'One-Way'}`);
     } catch (error: any) {
-      if (error.response?.data?.code !== -4300) {
-        this.logger.warn(`[BINANCE] Failed to set position mode: ${error.response?.data?.msg || error.message}`);
+      const errorCode = error.response?.data?.code;
+      const errorMsg = error.response?.data?.msg;
+
+      // Error -4300: "No need to change position side." - Position mode already matches the requested setting
+      if (errorCode === -4300) {
+        this.logger.debug(
+          `[POSITION MODE] Already configured correctly\n` +
+          `  Requested Mode: ${hedgeMode ? 'Hedge Mode (Dual Position)' : 'One-Way Mode'}\n` +
+          `  Status: No change needed (error -4300 is normal)\n` +
+          `  This is not an error - the account is already in the correct position mode`
+        );
+      }
+      // Error -4059: Position mode cannot be changed if positions exist
+      else if (errorCode === -4059) {
+        this.logger.error(
+          `[POSITION MODE] CANNOT CHANGE - Open positions exist!\n` +
+          `  Error: [${errorCode}] ${errorMsg}\n` +
+          `  Current Account Mode: ${hedgeMode ? 'One-Way Mode (trying to switch to Hedge)' : 'Hedge Mode (trying to switch to One-Way)'}\n` +
+          `  Required Action: Close ALL open positions on Binance Futures before changing position mode\n` +
+          `  ⚠️  Strategy configuration (hedgeMode: ${hedgeMode}) does not match account settings!\n` +
+          `  This will cause SL/TP orders to fail!`
+        );
+        throw new Error(
+          `Cannot change position mode while positions are open. ` +
+          `Close all positions and try again. ` +
+          `Strategy expects ${hedgeMode ? 'Hedge Mode' : 'One-Way Mode'} but account has open positions.`
+        );
+      }
+      // Other errors
+      else {
+        this.logger.error(
+          `[POSITION MODE] FAILED to set position mode\n` +
+          `  Error Code: ${errorCode}\n` +
+          `  Error Message: ${errorMsg}\n` +
+          `  Requested Mode: ${hedgeMode ? 'Hedge Mode (Dual Position)' : 'One-Way Mode'}\n` +
+          `  This may cause subsequent SL/TP orders to fail!`
+        );
+        this.logger.warn(
+          `[POSITION MODE] Continuing despite error, but SL/TP may fail if mode mismatch exists`
+        );
       }
     }
 
@@ -344,6 +464,9 @@ export class WebhookService {
     } catch (error: any) {
       this.logger.warn(`[BINANCE] Failed to set leverage: ${error.response?.data?.msg || error.message}`);
     }
+
+    // Verify that hedge mode was actually set correctly
+    await this.verifyHedgeModeSet(apiKey, apiSecret, isTestnet, hedgeMode);
   }
 
   private async cancelAllBinanceOrders(
@@ -417,70 +540,438 @@ export class WebhookService {
     apiSecret: string,
     isTestnet: boolean,
     hedgeMode: boolean = false
-  ): Promise<string | null> {
+  ): Promise<string> {
     try {
       const closeSide = side === 'BUY' ? 'SELL' : 'BUY';
+      const rules = await this.getSymbolRules(symbol, isTestnet);
 
       const params = new URLSearchParams();
       params.append('symbol', symbol);
       params.append('side', closeSide);
       params.append('type', 'STOP_MARKET');
-      const rules = await this.getSymbolRules(symbol, isTestnet);
+
       if (hedgeMode) {
-        params.append('positionSide', side === 'BUY' ? 'LONG' : 'SHORT');
-        params.append('quantity', this.normalizeQuantity(quantity, rules.qtyStep, rules.minQty));
+        const positionSide = side === 'BUY' ? 'LONG' : 'SHORT';
+        params.append('positionSide', positionSide);
+        params.append('closePosition', 'true');
+        params.append('quantity', '0');
+
+        this.logger.log(
+          `[SL CREATE] BEFORE API CALL - Hedge Mode with Auto-Adjust\n` +
+          `  Symbol: ${symbol}\n` +
+          `  Entry Side: ${side} → Close Side: ${closeSide}\n` +
+          `  Position Side: ${positionSide}\n` +
+          `  Stop Price: ${this.roundTick(stopPrice, rules.priceTick)}\n` +
+          `  Using closePosition=true (will auto-adjust after partial TPs)\n` +
+          `  Rules: step=${rules.qtyStep}, min=${rules.minQty}, tick=${rules.priceTick}`
+        );
       } else {
         params.append('quantity', '0');
         params.append('closePosition', 'true');
+
+        this.logger.log(
+          `[SL CREATE] BEFORE API CALL - One-Way Mode\n` +
+          `  Symbol: ${symbol}\n` +
+          `  Entry Side: ${side} → Close Side: ${closeSide}\n` +
+          `  Stop Price: ${this.roundTick(stopPrice, rules.priceTick)}\n` +
+          `  Using closePosition=true (auto-adjusts quantity)`
+        );
       }
+
       params.append('stopPrice', this.roundTick(stopPrice, rules.priceTick));
       params.append('workingType', 'MARK_PRICE');
 
+      this.logger.debug(`[SL CREATE] Full request params: ${params.toString()}`);
+
       const response = await this.createBinanceOrder(params, apiKey, apiSecret, isTestnet);
 
-      this.logger.log(`[BINANCE SL] Created for ${symbol} at ${stopPrice} - Order ID: ${response.orderId}`);
+      this.logger.log(`[SL CREATE] SUCCESS - Order ID: ${response.orderId}, Status: ${response.status}`);
       return response.orderId.toString();
     } catch (error: any) {
-      this.logger.error(`[BINANCE] Failed to create stop loss order: ${error.response?.data?.msg || error.message}`);
-      return null;
+      const errorCode = error.response?.data?.code;
+      const errorMsg = error.response?.data?.msg;
+      const errorData = error.response?.data;
+
+      this.logger.error(
+        `[SL CREATE] FAILED\n` +
+        `  Error Code: ${errorCode}\n` +
+        `  Error Message: ${errorMsg}\n` +
+        `  Symbol: ${symbol}\n` +
+        `  Stop Price: ${stopPrice}\n` +
+        `  Quantity: ${quantity}\n` +
+        `  Hedge Mode: ${hedgeMode}\n` +
+        `  Full Error: ${JSON.stringify(errorData)}`
+      );
+
+      throw new StopLossCreationError(symbol, errorCode, errorMsg, errorData);
     }
   }
 
   private async createBinanceTakeProfitOrder(
     symbol: string,
     side: 'BUY' | 'SELL',
-    quantity: number,
-    takeProfitPrice: number,
+    tpQuantity: number,
+    tpPrice: number,
     apiKey: string,
     apiSecret: string,
     isTestnet: boolean,
     hedgeMode: boolean = false
-  ): Promise<string | null> {
+  ): Promise<string> {
     try {
       const closeSide = side === 'BUY' ? 'SELL' : 'BUY';
+      const rules = await this.getSymbolRules(symbol, isTestnet);
+      const normalizedQty = this.normalizeQuantity(tpQuantity, rules.qtyStep, rules.minQty);
+      const normalizedPrice = this.roundTick(tpPrice, rules.priceTick);
 
       const params = new URLSearchParams();
       params.append('symbol', symbol);
       params.append('side', closeSide);
       params.append('type', 'TAKE_PROFIT_MARKET');
-      const rules = await this.getSymbolRules(symbol, isTestnet);
-      params.append('quantity', this.normalizeQuantity(quantity, rules.qtyStep, rules.minQty));
-      params.append('stopPrice', this.roundTick(takeProfitPrice, rules.priceTick));
+      params.append('quantity', normalizedQty);
+      params.append('stopPrice', normalizedPrice);
       params.append('workingType', 'MARK_PRICE');
+
       if (hedgeMode) {
-        params.append('positionSide', side === 'BUY' ? 'LONG' : 'SHORT');
+        const positionSide = side === 'BUY' ? 'LONG' : 'SHORT';
+        params.append('positionSide', positionSide);
+
+        this.logger.log(
+          `[TP CREATE] BEFORE API CALL - Hedge Mode\n` +
+          `  Symbol: ${symbol}\n` +
+          `  Entry Side: ${side} → Close Side: ${closeSide}\n` +
+          `  Position Side: ${positionSide}\n` +
+          `  TP Price: ${normalizedPrice}\n` +
+          `  Quantity: ${normalizedQty} (raw: ${tpQuantity})\n` +
+          `  Rules: step=${rules.qtyStep}, min=${rules.minQty}, tick=${rules.priceTick}`
+        );
       } else {
         params.append('reduceOnly', 'true');
+
+        this.logger.log(
+          `[TP CREATE] BEFORE API CALL - One-Way Mode\n` +
+          `  Symbol: ${symbol}\n` +
+          `  Entry Side: ${side} → Close Side: ${closeSide}\n` +
+          `  TP Price: ${normalizedPrice}\n` +
+          `  Quantity: ${normalizedQty} (raw: ${tpQuantity})\n` +
+          `  Using reduceOnly=true`
+        );
+      }
+
+      this.logger.debug(`[TP CREATE] Full request params: ${params.toString()}`);
+
+      const response = await this.createBinanceOrder(params, apiKey, apiSecret, isTestnet);
+
+      this.logger.log(`[TP CREATE] SUCCESS - Order ID: ${response.orderId}, Status: ${response.status}`);
+      return response.orderId.toString();
+    } catch (error: any) {
+      const errorCode = error.response?.data?.code;
+      const errorMsg = error.response?.data?.msg;
+      const errorData = error.response?.data;
+
+      this.logger.error(
+        `[TP CREATE] FAILED\n` +
+        `  Error Code: ${errorCode}\n` +
+        `  Error Message: ${errorMsg}\n` +
+        `  Symbol: ${symbol}\n` +
+        `  TP Price: ${tpPrice}\n` +
+        `  Quantity: ${tpQuantity}\n` +
+        `  Hedge Mode: ${hedgeMode}\n` +
+        `  Full Error: ${JSON.stringify(errorData)}`
+      );
+
+      throw new TakeProfitCreationError(symbol, errorCode, errorMsg, errorData);
+    }
+  }
+
+  /**
+   * Verifies that a position exists on Binance before creating SL/TP orders.
+   * Retries up to 5 times with exponential backoff to handle race conditions.
+   */
+  private async verifyPositionExists(
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    apiKey: string,
+    apiSecret: string,
+    isTestnet: boolean,
+    hedgeMode: boolean = false
+  ): Promise<void> {
+    const baseURL = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
+    const endpoint = '/fapi/v2/positionRisk';
+    const positionSide = hedgeMode ? (side === 'BUY' ? 'LONG' : 'SHORT') : 'BOTH';
+
+    const maxRetries = 5;
+    const initialDelay = 500; // ms
+
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const params = new URLSearchParams();
+        params.append('symbol', symbol);
+        params.append('timestamp', Date.now().toString());
+
+        const queryString = params.toString();
+        const signature = crypto.createHmac('sha256', apiSecret).update(queryString).digest('hex');
+
+        this.logger.debug(
+          `[POSITION VERIFY] Attempt ${attempt}/${maxRetries} - Checking ${symbol} ${positionSide}`
+        );
+
+        const response = await axios.get(
+          `${baseURL}${endpoint}?${queryString}&signature=${signature}`,
+          { headers: { 'X-MBX-APIKEY': apiKey } }
+        );
+
+        const positions = response.data;
+        const targetPosition = positions.find((pos: any) =>
+          pos.symbol === symbol && pos.positionSide === positionSide
+        );
+
+        if (!targetPosition) {
+          this.logger.warn(
+            `[POSITION VERIFY] Position not found - Symbol: ${symbol}, Side: ${positionSide}`
+          );
+
+          if (attempt < maxRetries) {
+            const delay = initialDelay * Math.pow(2, attempt - 1);
+            this.logger.debug(`[POSITION VERIFY] Retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+
+          throw new PositionNotFoundError(symbol, positionSide);
+        }
+
+        const positionAmt = Math.abs(parseFloat(targetPosition.positionAmt));
+
+        if (positionAmt === 0) {
+          this.logger.warn(
+            `[POSITION VERIFY] Position exists but quantity is 0 - Symbol: ${symbol}, Side: ${positionSide}`
+          );
+
+          if (attempt < maxRetries) {
+            const delay = initialDelay * Math.pow(2, attempt - 1);
+            this.logger.debug(`[POSITION VERIFY] Retrying in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+            continue;
+          }
+
+          throw new PositionNotFoundError(symbol, positionSide);
+        }
+
+        this.logger.log(
+          `[POSITION VERIFY] SUCCESS - Position found\n` +
+          `  Symbol: ${symbol}\n` +
+          `  Position Side: ${positionSide}\n` +
+          `  Quantity: ${positionAmt}\n` +
+          `  Entry Price: ${targetPosition.entryPrice}\n` +
+          `  Attempt: ${attempt}/${maxRetries}`
+        );
+
+        return;
+      } catch (error: any) {
+        if (error instanceof PositionNotFoundError) {
+          throw error;
+        }
+
+        this.logger.error(
+          `[POSITION VERIFY] API Error on attempt ${attempt}/${maxRetries}\n` +
+          `  Symbol: ${symbol}\n` +
+          `  Error: ${error.response?.data?.msg || error.message}`
+        );
+
+        if (attempt === maxRetries) {
+          throw new PositionNotFoundError(symbol, positionSide);
+        }
+
+        const delay = initialDelay * Math.pow(2, attempt - 1);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+  }
+
+  /**
+   * Verifies that hedge mode was successfully set on Binance.
+   * Checks the account position mode setting to confirm dual position mode.
+   */
+  private async verifyHedgeModeSet(
+    apiKey: string,
+    apiSecret: string,
+    isTestnet: boolean,
+    expectedHedgeMode: boolean
+  ): Promise<void> {
+    const baseURL = isTestnet ? this.BINANCE_TESTNET_URL : this.BINANCE_MAINNET_URL;
+    const endpoint = '/fapi/v1/positionSide/dual';
+
+    try {
+      const params = new URLSearchParams();
+      params.append('timestamp', Date.now().toString());
+
+      const queryString = params.toString();
+      const signature = crypto.createHmac('sha256', apiSecret).update(queryString).digest('hex');
+
+      this.logger.debug(`[HEDGE MODE VERIFY] Checking position mode setting...`);
+
+      const response = await axios.get(
+        `${baseURL}${endpoint}?${queryString}&signature=${signature}`,
+        { headers: { 'X-MBX-APIKEY': apiKey } }
+      );
+
+      const actualDualMode = response.data.dualSidePosition;
+
+      if (actualDualMode !== expectedHedgeMode) {
+        this.logger.error(
+          `[HEDGE MODE VERIFY] MISMATCH\n` +
+          `  Expected: ${expectedHedgeMode ? 'Hedge Mode' : 'One-Way Mode'}\n` +
+          `  Actual: ${actualDualMode ? 'Hedge Mode' : 'One-Way Mode'}\n` +
+          `  This will cause SL/TP orders to fail!`
+        );
+
+        throw new Error(
+          `Position mode mismatch: Expected ${expectedHedgeMode ? 'Hedge' : 'One-Way'} mode, ` +
+          `but account is in ${actualDualMode ? 'Hedge' : 'One-Way'} mode. ` +
+          `SL/TP orders will fail with this mismatch.`
+        );
+      }
+
+      this.logger.log(
+        `[HEDGE MODE VERIFY] SUCCESS - Position mode confirmed: ${actualDualMode ? 'Hedge Mode' : 'One-Way Mode'}`
+      );
+    } catch (error: any) {
+      if (error.message?.includes('Position mode mismatch')) {
+        throw error;
+      }
+
+      const errorCode = error.response?.data?.code;
+      const errorMsg = error.response?.data?.msg;
+
+      this.logger.error(
+        `[HEDGE MODE VERIFY] API Error\n` +
+        `  Error Code: ${errorCode}\n` +
+        `  Error Message: ${errorMsg}`
+      );
+
+      throw new Error(
+        `Failed to verify hedge mode setting: [${errorCode}] ${errorMsg}`
+      );
+    }
+  }
+
+  /**
+   * Rolls back (closes) a position if SL/TP orders cannot be created.
+   * Uses MARKET order with closePosition=true to close the entire position immediately.
+   * This prevents leaving a position unprotected.
+   */
+  private async rollbackPosition(
+    symbol: string,
+    side: 'BUY' | 'SELL',
+    entryOrderId: string,
+    apiKey: string,
+    apiSecret: string,
+    isTestnet: boolean,
+    hedgeMode: boolean = false
+  ): Promise<void> {
+    try {
+      const closeSide = side === 'BUY' ? 'SELL' : 'BUY';
+      const positionSide = hedgeMode ? (side === 'BUY' ? 'LONG' : 'SHORT') : 'BOTH';
+
+      this.logger.warn(
+        `[ROLLBACK] INITIATING POSITION CLOSURE\n` +
+        `  Symbol: ${symbol}\n` +
+        `  Entry Order ID: ${entryOrderId}\n` +
+        `  Entry Side: ${side} → Close Side: ${closeSide}\n` +
+        `  Position Side: ${positionSide}\n` +
+        `  Reason: Failed to create SL/TP protection orders\n` +
+        `  Action: Closing position with MARKET order`
+      );
+
+      const params = new URLSearchParams();
+      params.append('symbol', symbol);
+      params.append('side', closeSide);
+      params.append('type', 'MARKET');
+      params.append('quantity', '0');
+      params.append('closePosition', 'true');
+
+      if (hedgeMode) {
+        params.append('positionSide', positionSide);
       }
 
       const response = await this.createBinanceOrder(params, apiKey, apiSecret, isTestnet);
 
-      this.logger.log(`[BINANCE TP] Created for ${symbol} at ${takeProfitPrice} - Order ID: ${response.orderId}`);
-      return response.orderId.toString();
+      this.logger.warn(
+        `[ROLLBACK] SUCCESS - Position closed\n` +
+        `  Close Order ID: ${response.orderId}\n` +
+        `  Status: ${response.status}\n` +
+        `  Executed Quantity: ${response.executedQty}\n` +
+        `  Avg Price: ${response.avgPrice}\n` +
+        `  Entry Order ID: ${entryOrderId} was closed due to protection failure`
+      );
     } catch (error: any) {
-      this.logger.error(`[BINANCE] Failed to create take profit order: ${error.response?.data?.msg || error.message}`);
-      return null;
+      const errorCode = error.response?.data?.code;
+      const errorMsg = error.response?.data?.msg;
+      const errorData = error.response?.data;
+
+      this.logger.error(
+        `[ROLLBACK] CRITICAL FAILURE - Could not close unprotected position!\n` +
+        `  Symbol: ${symbol}\n` +
+        `  Entry Order ID: ${entryOrderId}\n` +
+        `  Error Code: ${errorCode}\n` +
+        `  Error Message: ${errorMsg}\n` +
+        `  Full Error: ${JSON.stringify(errorData)}\n` +
+        `  ⚠️  MANUAL INTERVENTION REQUIRED - Position is open without SL/TP protection!`
+      );
+
+      throw new Error(
+        `CRITICAL: Failed to rollback position ${symbol}. ` +
+        `Position may be unprotected. Manual intervention required. ` +
+        `Entry Order ID: ${entryOrderId}, Error: [${errorCode}] ${errorMsg}`
+      );
     }
+  }
+
+  /**
+   * Executes an async function with automatic retry on rate limit or transient errors.
+   * Useful for API calls that may fail due to temporary issues.
+   */
+  private async executeWithRetry<T>(
+    operation: () => Promise<T>,
+    operationName: string,
+    maxRetries: number = 3,
+    initialDelay: number = 1000
+  ): Promise<T> {
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        return await operation();
+      } catch (error: any) {
+        const errorCode = error.response?.data?.code;
+        const errorMsg = error.response?.data?.msg || error.message;
+
+        // Retry on rate limit (-1003) or server errors (-1001, -1021)
+        const isRetryable = errorCode === -1003 || errorCode === -1001 || errorCode === -1021;
+
+        if (isRetryable && attempt < maxRetries) {
+          const delay = initialDelay * Math.pow(2, attempt - 1);
+          this.logger.warn(
+            `[RETRY] ${operationName} failed (attempt ${attempt}/${maxRetries})\n` +
+            `  Error: [${errorCode}] ${errorMsg}\n` +
+            `  Retrying in ${delay}ms...`
+          );
+          await new Promise(resolve => setTimeout(resolve, delay));
+          continue;
+        }
+
+        // Not retryable or max retries reached
+        if (attempt === maxRetries) {
+          this.logger.error(
+            `[RETRY] ${operationName} failed after ${maxRetries} attempts\n` +
+            `  Final Error: [${errorCode}] ${errorMsg}`
+          );
+        }
+
+        throw error;
+      }
+    }
+
+    // This should never be reached, but TypeScript needs it
+    throw new Error(`executeWithRetry failed for ${operationName} without throwing`);
   }
 
   private calculateStopLossPrice(side: 'BUY' | 'SELL', entryPrice: number, stopLossPercentage: number): number {
@@ -864,82 +1355,176 @@ export class WebhookService {
       tradeData.entryPrice = entryPrice;
       tradeData.exchangeOrderId = tradeDetails.id;
 
-      await new Promise(r => setTimeout(r, 1500));
-
-      // --- STOP LOSS ---
-      let stopLossPrice: number | null = null;
-      if (signal.stopLoss) {
-        stopLossPrice = signal.stopLoss;
-        this.logger.log(`[SL] Using absolute stop loss from signal: ${stopLossPrice}`);
-      } else if (strategy.stopLossPercentage && strategy.stopLossPercentage > 0) {
-        stopLossPrice = this.calculateStopLossPrice(side, entryPrice, strategy.stopLossPercentage);
-        this.logger.log(`[SL] Calculated stop loss from strategy (${strategy.stopLossPercentage}%): ${stopLossPrice}`);
+      // For Binance: Verify position exists before creating SL/TP (prevents race condition)
+      if (exchange === Exchange.BINANCE) {
+        this.logger.log(`[POSITION VERIFY] Waiting for position to appear in system...`);
+        try {
+          await this.verifyPositionExists(
+            normalizedSymbol,
+            side,
+            decryptedKey,
+            decryptedSecret,
+            strategy.isTestnet,
+            strategy.hedgeMode
+          );
+        } catch (error: any) {
+          this.logger.error(
+            `[POSITION VERIFY] Failed - Position not found after entry order.\n` +
+            `  This may indicate the entry order was not filled or a system delay.\n` +
+            `  Proceeding with caution...`
+          );
+          // Don't throw here - let SL/TP creation attempt and handle errors there
+        }
       }
 
-      if (stopLossPrice) {
-          // Fetch rules early for Stop Loss
+      // --- STOP LOSS & TAKE PROFIT CREATION WITH ROLLBACK ---
+      // CRITICAL: If SL/TP creation fails, we MUST close the position to avoid unprotected trades
+      try {
+        // --- STOP LOSS ---
+        let stopLossPrice: number | null = null;
+        if (signal.stopLoss) {
+          stopLossPrice = signal.stopLoss;
+          this.logger.log(`[SL] Using absolute stop loss from signal: ${stopLossPrice}`);
+        } else if (strategy.stopLossPercentage && strategy.stopLossPercentage > 0) {
+          stopLossPrice = this.calculateStopLossPrice(side, entryPrice, strategy.stopLossPercentage);
+          this.logger.log(`[SL] Calculated stop loss from strategy (${strategy.stopLossPercentage}%): ${stopLossPrice}`);
+        }
+
+        if (stopLossPrice) {
           const rules = await this.getSymbolRules(normalizedSymbol, strategy.isTestnet);
 
           if (exchange === Exchange.BYBIT) {
-             const bybitSide = side === 'BUY' ? 'Buy' : 'Sell';
-             await this.bybitClient.setTradingStop(
-                decryptedKey, decryptedSecret, strategy.isTestnet,
-                normalizedSymbol, bybitSide, this.roundTick(stopLossPrice, rules.priceTick), undefined
-             );
+            const bybitSide = side === 'BUY' ? 'Buy' : 'Sell';
+            await this.bybitClient.setTradingStop(
+              decryptedKey, decryptedSecret, strategy.isTestnet,
+              normalizedSymbol, bybitSide, this.roundTick(stopLossPrice, rules.priceTick), undefined
+            );
           } else {
-             stopLossOrderId = await this.createBinanceStopLossOrder(
-                normalizedSymbol, side, quantity, stopLossPrice, decryptedKey, decryptedSecret, strategy.isTestnet, strategy.hedgeMode
-             );
+            // This now throws on error instead of returning null
+            stopLossOrderId = await this.createBinanceStopLossOrder(
+              normalizedSymbol, side, quantity, stopLossPrice, decryptedKey, decryptedSecret, strategy.isTestnet, strategy.hedgeMode
+            );
+            this.logger.log(`[SL] Successfully created Stop Loss order: ${stopLossOrderId}`);
           }
-      }
+        }
 
-      // --- MULTI-PARTIAL TAKE PROFITS ---
-      const tpConfigs = [
+        // --- MULTI-PARTIAL TAKE PROFITS ---
+        const tpConfigs = [
           { percent: strategy.takeProfitPercentage1, qtyPercent: strategy.takeProfitQuantity1 || 33, id: 1 },
           { percent: strategy.takeProfitPercentage2, qtyPercent: strategy.takeProfitQuantity2 || 33, id: 2 },
           { percent: strategy.takeProfitPercentage3, qtyPercent: strategy.takeProfitQuantity3 || 34, id: 3 },
-      ];
+        ];
 
-      const tpOrderIds: string[] = [];
+        const tpOrderIds: string[] = [];
 
-      for (const tp of tpConfigs) {
+        for (const tp of tpConfigs) {
           if (tp.percent && tp.percent > 0) {
-              const tpPrice = this.calculateTakeProfitPrice(side, entryPrice, tp.percent);
-              const tpQty = (quantity * tp.qtyPercent) / 100;
+            const tpPrice = this.calculateTakeProfitPrice(side, entryPrice, tp.percent);
+            const tpQty = (quantity * tp.qtyPercent) / 100;
 
-              if (tpQty <= 0) continue;
+            if (tpQty <= 0) continue;
 
-              this.logger.log(`[TP${tp.id}] Placing partial TP at ${tpPrice.toFixed(2)} for ${this.formatQuantityWithUsdt(tpQty, tpPrice)} (${tp.qtyPercent}%)`);
+            this.logger.log(`[TP${tp.id}] Placing partial TP at ${tpPrice.toFixed(2)} for ${this.formatQuantityWithUsdt(tpQty, tpPrice)} (${tp.qtyPercent}%)`);
 
-              const rules = await this.getSymbolRules(normalizedSymbol, strategy.isTestnet);
+            const rules = await this.getSymbolRules(normalizedSymbol, strategy.isTestnet);
 
-              if (exchange === Exchange.BYBIT) {
-                   await this.bybitClient.createOrder(
-                      decryptedKey, decryptedSecret, strategy.isTestnet,
-                      {
-                          symbol: normalizedSymbol,
-                          side: side === 'BUY' ? 'Sell' : 'Buy',
-                          orderType: 'Limit',
-                          qty: this.normalizeQuantity(tpQty, rules.qtyStep, rules.minQty),
-                          price: this.roundTick(tpPrice, rules.priceTick),
-                          reduceOnly: true
-                      }
-                  );
-              } else {
-                  const tpOrderId = await this.createBinanceTakeProfitOrder(
-                      normalizedSymbol, side, tpQty, tpPrice, decryptedKey, decryptedSecret, strategy.isTestnet, strategy.hedgeMode
-                  );
-                  if (tpOrderId) {
-                    tpOrderIds.push(`${tp.id}:${tpOrderId}`);
-                  } else {
-                    this.logger.warn(`[TP${tp.id}] Failed to place exchange TP order — will rely on manual monitoring`);
-                  }
-              }
+            if (exchange === Exchange.BYBIT) {
+              await this.bybitClient.createOrder(
+                decryptedKey, decryptedSecret, strategy.isTestnet,
+                {
+                  symbol: normalizedSymbol,
+                  side: side === 'BUY' ? 'Sell' : 'Buy',
+                  orderType: 'Limit',
+                  qty: this.normalizeQuantity(tpQty, rules.qtyStep, rules.minQty),
+                  price: this.roundTick(tpPrice, rules.priceTick),
+                  reduceOnly: true
+                }
+              );
+            } else {
+              // This now throws on error instead of returning null
+              const tpOrderId = await this.createBinanceTakeProfitOrder(
+                normalizedSymbol, side, tpQty, tpPrice, decryptedKey, decryptedSecret, strategy.isTestnet, strategy.hedgeMode
+              );
+              tpOrderIds.push(`${tp.id}:${tpOrderId}`);
+              this.logger.log(`[TP${tp.id}] Successfully created Take Profit order: ${tpOrderId}`);
+            }
           }
-      }
+        }
 
-      if (tpOrderIds.length > 0) {
-        takeProfitOrderId = tpOrderIds.join('|');
+        if (tpOrderIds.length > 0) {
+          takeProfitOrderId = tpOrderIds.join('|');
+        }
+
+        this.logger.log(
+          `[PROTECTION] All protection orders created successfully\n` +
+          `  Stop Loss: ${stopLossOrderId || 'N/A'}\n` +
+          `  Take Profits: ${takeProfitOrderId || 'N/A'}`
+        );
+
+      } catch (protectionError: any) {
+        // CRITICAL: SL/TP creation failed - position is unprotected
+        this.logger.error(
+          `[PROTECTION] FAILED - Cannot create protection orders!\n` +
+          `  Error: ${protectionError.message}\n` +
+          `  Entry Order ID: ${tradeDetails.id}\n` +
+          `  Symbol: ${normalizedSymbol}\n` +
+          `  Action: Rolling back position to prevent unprotected trade`
+        );
+
+        // Rollback: Close the position immediately for Binance
+        if (exchange === Exchange.BINANCE) {
+          try {
+            await this.rollbackPosition(
+              normalizedSymbol,
+              side,
+              tradeDetails.id,
+              decryptedKey,
+              decryptedSecret,
+              strategy.isTestnet,
+              strategy.hedgeMode
+            );
+
+            // Update trade record to show it was rolled back
+            await this.tradesService.updateTrade(savedTrade.id, {
+              entryPrice: tradeData.entryPrice,
+              exchangeOrderId: tradeData.exchangeOrderId,
+              stopLossOrderId: 'ROLLBACK',
+              takeProfitOrderId: 'ROLLBACK_DUE_TO_PROTECTION_FAILURE',
+            });
+
+            throw new PositionProtectionError(
+              `Position opened but protection orders failed. Position has been closed automatically. ` +
+              `Original error: ${protectionError.message}`,
+              tradeDetails.id,
+              normalizedSymbol
+            );
+          } catch (rollbackError: any) {
+            // Even rollback failed - CRITICAL situation
+            this.logger.error(
+              `[ROLLBACK] CRITICAL FAILURE\n` +
+              `  Could not close unprotected position!\n` +
+              `  Symbol: ${normalizedSymbol}\n` +
+              `  Entry Order: ${tradeDetails.id}\n` +
+              `  ⚠️  MANUAL INTERVENTION REQUIRED`
+            );
+
+            await this.tradesService.updateTrade(savedTrade.id, {
+              entryPrice: tradeData.entryPrice,
+              exchangeOrderId: tradeData.exchangeOrderId,
+              stopLossOrderId: 'ROLLBACK_FAILED',
+              takeProfitOrderId: 'CRITICAL_UNPROTECTED_POSITION',
+            });
+
+            throw rollbackError;
+          }
+        } else {
+          // Bybit - just throw the error (Bybit has different order management)
+          throw new PositionProtectionError(
+            `Failed to create protection orders: ${protectionError.message}`,
+            tradeDetails.id,
+            normalizedSymbol
+          );
+        }
       }
 
       await this.tradesService.updateTrade(savedTrade.id, {
