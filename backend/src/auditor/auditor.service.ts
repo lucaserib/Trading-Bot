@@ -1,6 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, Between } from 'typeorm';
+import { Repository, Between, In } from 'typeorm';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { AuditLog, AuditCategory, AuditSeverity } from './audit-log.entity';
 import { computePercentMismatch } from './percent-mismatch.util';
@@ -606,6 +606,50 @@ export class AuditorService {
       .getRawMany();
 
     return { total, bySeverity, byCategory };
+  }
+
+  async getAlerts(portfolioId?: string) {
+    let strategyIds: string[] | null = null;
+    if (portfolioId) {
+      const strategies = await this.strategyRepo.find({ where: { portfolioId } as any, select: ['id'] });
+      strategyIds = strategies.map((s) => s.id);
+    }
+
+    const auditIssues = await this.auditRepo.find({
+      where: strategyIds
+        ? [
+            { severity: AuditSeverity.ERROR, strategyId: In(strategyIds) },
+            { severity: AuditSeverity.WARNING, strategyId: In(strategyIds) },
+          ]
+        : [{ severity: AuditSeverity.ERROR }, { severity: AuditSeverity.WARNING }],
+      order: { createdAt: 'DESC' },
+      take: 50,
+    });
+
+    const errorTradesWhere: any = { status: 'ERROR' };
+    if (portfolioId) errorTradesWhere.portfolioId = portfolioId;
+    const errorTrades = await this.tradeRepo.find({ where: errorTradesWhere, order: { timestamp: 'DESC' }, take: 50 });
+
+    const openTradesWhere: any = { status: 'OPEN' };
+    if (portfolioId) openTradesWhere.portfolioId = portfolioId;
+    const openTrades = await this.tradeRepo.find({ where: openTradesWhere, order: { timestamp: 'DESC' } });
+    const tpWarningTrades = openTrades.filter((t) => !!t.tpWarnings);
+    const unprotectedTrades = openTrades.filter((t) => !t.stopLossOrderId || !t.takeProfitOrderId);
+
+    const pausedStrategiesWhere: any = { pauseNewOrders: true };
+    if (portfolioId) pausedStrategiesWhere.portfolioId = portfolioId;
+    const pausedStrategies = await this.strategyRepo.find({
+      where: pausedStrategiesWhere,
+      select: ['id', 'name', 'portfolioId'],
+    });
+
+    return {
+      auditIssues,
+      errorTrades,
+      tpWarningTrades,
+      unprotectedTrades,
+      pausedStrategies,
+    };
   }
 
   async compareBacktestVsBot(

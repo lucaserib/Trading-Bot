@@ -124,4 +124,9 @@ export class AuditorController {
   async getSummary(@Query('strategyId') strategyId?: string) {
     return this.auditorService.getAuditSummary(strategyId);
   }
+
+  @Get('alerts')
+  async getAlerts(@Query('portfolioId') portfolioId?: string) {
+    return this.auditorService.getAlerts(portfolioId);
+  }
 }

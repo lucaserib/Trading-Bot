@@ -195,3 +195,63 @@ describe('AuditorService (FASE 2 -- CredentialsResolver)', () => {
     expect(exchangeService.getExchange).toHaveBeenCalledWith('bybit', 'portfolio-key', 'portfolio-secret', false);
   });
 });
+
+describe('AuditorService.getAlerts (FASE 9 -- pagina Avisos)', () => {
+  let service: AuditorService;
+  let auditRepo: { find: jest.Mock };
+  let tradeRepo: { find: jest.Mock };
+  let strategyRepo: { find: jest.Mock };
+
+  beforeEach(async () => {
+    auditRepo = { find: jest.fn().mockResolvedValue([]) };
+    tradeRepo = { find: jest.fn().mockResolvedValue([]) };
+    strategyRepo = { find: jest.fn().mockResolvedValue([]) };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        AuditorService,
+        { provide: getRepositoryToken(AuditLog), useValue: auditRepo },
+        { provide: getRepositoryToken(Trade), useValue: tradeRepo },
+        { provide: getRepositoryToken(TradeExecution), useValue: { find: jest.fn() } },
+        { provide: getRepositoryToken(Strategy), useValue: strategyRepo },
+        { provide: ExchangeService, useValue: {} },
+        { provide: CredentialsResolverService, useValue: { resolveCredentials: jest.fn() } },
+      ],
+    }).compile();
+
+    service = module.get<AuditorService>(AuditorService);
+  });
+
+  it('sem portfolioId: agrega issues ERROR/WARNING, trades ERROR, tpWarnings, sem protecao e estrategias pausadas globalmente', async () => {
+    auditRepo.find.mockResolvedValue([{ id: 'log-1', severity: AuditSeverity.WARNING }]);
+    tradeRepo.find
+      .mockResolvedValueOnce([{ id: 'trade-error', status: 'ERROR' }])
+      .mockResolvedValueOnce([
+        { id: 'trade-open-1', status: 'OPEN', tpWarnings: 'TP_MISSING_RETRY:1', stopLossOrderId: 'sl-1', takeProfitOrderId: 'tp-1' },
+        { id: 'trade-open-2', status: 'OPEN', tpWarnings: null, stopLossOrderId: null, takeProfitOrderId: 'tp-1' },
+      ]);
+    strategyRepo.find.mockResolvedValue([{ id: 's1', name: 'Pausada', portfolioId: null }]);
+
+    const result = await service.getAlerts();
+
+    expect(result.auditIssues).toHaveLength(1);
+    expect(result.errorTrades).toEqual([{ id: 'trade-error', status: 'ERROR' }]);
+    expect(result.tpWarningTrades.map((t) => t.id)).toEqual(['trade-open-1']);
+    expect(result.unprotectedTrades.map((t) => t.id)).toEqual(['trade-open-2']);
+    expect(result.pausedStrategies).toEqual([{ id: 's1', name: 'Pausada', portfolioId: null }]);
+  });
+
+  it('com portfolioId: filtra trades/estrategias pelo portfolio e os audit logs pelas estrategias daquele portfolio', async () => {
+    strategyRepo.find.mockResolvedValueOnce([{ id: 's1' }]);
+
+    await service.getAlerts('portfolio-1');
+
+    expect(strategyRepo.find).toHaveBeenNthCalledWith(1, { where: { portfolioId: 'portfolio-1' }, select: ['id'] });
+    const auditWhere = auditRepo.find.mock.calls[0][0].where;
+    expect(auditWhere[0]).toMatchObject({ severity: AuditSeverity.ERROR });
+    expect(auditWhere[1]).toMatchObject({ severity: AuditSeverity.WARNING });
+    expect(tradeRepo.find).toHaveBeenNthCalledWith(1, expect.objectContaining({ where: { status: 'ERROR', portfolioId: 'portfolio-1' } }));
+    expect(tradeRepo.find).toHaveBeenNthCalledWith(2, expect.objectContaining({ where: { status: 'OPEN', portfolioId: 'portfolio-1' } }));
+    expect(strategyRepo.find).toHaveBeenNthCalledWith(2, expect.objectContaining({ where: { pauseNewOrders: true, portfolioId: 'portfolio-1' } }));
+  });
+});
