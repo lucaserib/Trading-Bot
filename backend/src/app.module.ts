@@ -22,6 +22,7 @@ import { ValidationReportsModule } from './validation-reports/validation-reports
 import { PortfoliosModule } from './portfolios/portfolios.module';
 import { CommonModule } from './common/common.module';
 import { PerformanceModule } from './performance/performance.module';
+import { AdminModule } from './admin/admin.module';
 
 @Module({
   imports: [
@@ -77,6 +78,7 @@ import { PerformanceModule } from './performance/performance.module';
     PortfoliosModule,
     CommonModule,
     PerformanceModule,
+    AdminModule,
   ],
   controllers: [AppController],
   providers: [

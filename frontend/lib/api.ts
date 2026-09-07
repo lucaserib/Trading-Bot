@@ -96,6 +96,12 @@ export async function migrateLegacyPortfolios() {
   return res.json();
 }
 
+export async function backfillTradePortfolioIds() {
+  const res = await fetch(`${API_URL}/api/portfolios/backfill-trade-portfolio-ids`, { method: 'POST' });
+  if (!res.ok) throw new Error(await parseErrorMessage(res, 'Failed to backfill trade portfolio ids'));
+  return res.json();
+}
+
 export async function fetchTrades(params: { status?: string; limit?: number; portfolioId?: string } = {}) {
   const qs = new URLSearchParams();
   if (params.status) qs.set('status', params.status);

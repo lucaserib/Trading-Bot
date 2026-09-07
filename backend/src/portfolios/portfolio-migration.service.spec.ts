@@ -3,6 +3,7 @@ import { getRepositoryToken } from '@nestjs/typeorm';
 import { PortfolioMigrationService } from './portfolio-migration.service';
 import { Portfolio, PortfolioMode } from './portfolio.entity';
 import { Strategy, Exchange } from '../strategies/strategy.entity';
+import { Trade } from '../strategies/trade.entity';
 
 function makeQueryBuilder(strategies: any[]) {
   return {
@@ -145,5 +146,79 @@ describe('PortfolioMigrationService', () => {
     const second = await service.migrateLegacyStrategies();
 
     expect(second).toEqual({ portfoliosCreated: 0, strategiesLinked: 0 });
+  });
+});
+
+describe('PortfolioMigrationService.backfillTradePortfolioIds', () => {
+  let service: PortfolioMigrationService;
+  let strategyFindRepo: { find: jest.Mock };
+  let tradeUpdateBuilder: { set: jest.Mock; where: jest.Mock; andWhere: jest.Mock; execute: jest.Mock };
+  let tradeRepo: { createQueryBuilder: jest.Mock };
+  let portfoliosRepository: { manager: { transaction: jest.Mock } };
+
+  function setup(strategiesWithPortfolio: any[], affectedPerStrategy: number[] = []) {
+    strategyFindRepo = { find: jest.fn().mockResolvedValue(strategiesWithPortfolio) };
+    tradeUpdateBuilder = {
+      set: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      execute: jest.fn(),
+    };
+    let call = 0;
+    tradeUpdateBuilder.execute.mockImplementation(() => Promise.resolve({ affected: affectedPerStrategy[call++] ?? 0 }));
+    tradeRepo = {
+      createQueryBuilder: jest.fn().mockReturnValue({ update: jest.fn().mockReturnValue(tradeUpdateBuilder) }),
+    };
+    const manager = {
+      getRepository: jest.fn((entity: any) => (entity === Strategy ? strategyFindRepo : tradeRepo)),
+    };
+    portfoliosRepository.manager.transaction = jest.fn((cb: any) => cb(manager));
+  }
+
+  beforeEach(async () => {
+    portfoliosRepository = { manager: { transaction: jest.fn() } };
+
+    const module: TestingModule = await Test.createTestingModule({
+      providers: [
+        PortfolioMigrationService,
+        { provide: getRepositoryToken(Portfolio), useValue: portfoliosRepository },
+      ],
+    }).compile();
+
+    service = module.get<PortfolioMigrationService>(PortfolioMigrationService);
+    setup([]);
+  });
+
+  it('busca so estrategias com portfolioId preenchido e atualiza os trades daquela estrategia sem portfolioId', async () => {
+    setup(
+      [{ id: 's1', portfolioId: 'p1' }, { id: 's2', portfolioId: 'p2' }],
+      [3, 5],
+    );
+
+    const result = await service.backfillTradePortfolioIds();
+
+    expect(strategyFindRepo.find).toHaveBeenCalledWith({ where: { portfolioId: expect.anything() }, select: ['id', 'portfolioId'] });
+    expect(tradeUpdateBuilder.set).toHaveBeenNthCalledWith(1, { portfolioId: 'p1' });
+    expect(tradeUpdateBuilder.set).toHaveBeenNthCalledWith(2, { portfolioId: 'p2' });
+    expect(tradeUpdateBuilder.andWhere).toHaveBeenCalledWith('"portfolioId" IS NULL');
+    expect(result).toEqual({ tradesUpdated: 8 });
+  });
+
+  it('sem estrategias com portfolio, nao atualiza nenhum trade', async () => {
+    setup([]);
+
+    const result = await service.backfillTradePortfolioIds();
+
+    expect(result).toEqual({ tradesUpdated: 0 });
+  });
+
+  it('rodar duas vezes seguidas e um no-op na segunda vez (idempotente, filtro portfolioId IS NULL)', async () => {
+    setup([{ id: 's1', portfolioId: 'p1' }], [4]);
+    const first = await service.backfillTradePortfolioIds();
+    expect(first).toEqual({ tradesUpdated: 4 });
+
+    setup([{ id: 's1', portfolioId: 'p1' }], [0]);
+    const second = await service.backfillTradePortfolioIds();
+    expect(second).toEqual({ tradesUpdated: 0 });
   });
 });

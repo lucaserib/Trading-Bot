@@ -1,12 +1,17 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { IsNull, Not, Repository } from 'typeorm';
 import { Portfolio, PortfolioMode } from './portfolio.entity';
 import { Strategy } from '../strategies/strategy.entity';
+import { Trade } from '../strategies/trade.entity';
 
 export interface LegacyMigrationResult {
   portfoliosCreated: number;
   strategiesLinked: number;
+}
+
+export interface TradeBackfillResult {
+  tradesUpdated: number;
 }
 
 @Injectable()
@@ -84,6 +89,33 @@ export class PortfolioMigrationService {
         `[MIGRATION] ${portfoliosCreated} portfolio(s) criado(s), ${strategiesLinked} estrategia(s) vinculada(s)`,
       );
       return { portfoliosCreated, strategiesLinked };
+    });
+  }
+
+  async backfillTradePortfolioIds(): Promise<TradeBackfillResult> {
+    return this.portfoliosRepository.manager.transaction(async (manager) => {
+      const strategyRepo = manager.getRepository(Strategy);
+      const tradeRepo = manager.getRepository(Trade);
+
+      const strategiesWithPortfolio = await strategyRepo.find({
+        where: { portfolioId: Not(IsNull()) },
+        select: ['id', 'portfolioId'],
+      });
+
+      let tradesUpdated = 0;
+      for (const strategy of strategiesWithPortfolio) {
+        const result = await tradeRepo
+          .createQueryBuilder()
+          .update(Trade)
+          .set({ portfolioId: strategy.portfolioId })
+          .where('"strategyId" = :strategyId', { strategyId: strategy.id })
+          .andWhere('"portfolioId" IS NULL')
+          .execute();
+        tradesUpdated += result.affected || 0;
+      }
+
+      this.logger.log(`[BACKFILL] ${tradesUpdated} trade(s) receberam portfolioId a partir da estrategia`);
+      return { tradesUpdated };
     });
   }
 }

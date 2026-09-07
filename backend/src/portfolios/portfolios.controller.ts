@@ -20,6 +20,11 @@ export class PortfoliosController {
     return this.portfolioMigrationService.migrateLegacyStrategies();
   }
 
+  @Post('backfill-trade-portfolio-ids')
+  backfillTradePortfolioIds() {
+    return this.portfolioMigrationService.backfillTradePortfolioIds();
+  }
+
   @Get(':id')
   findOne(@Param('id') id: string) {
     return this.portfoliosService.findOnePublic(id);
