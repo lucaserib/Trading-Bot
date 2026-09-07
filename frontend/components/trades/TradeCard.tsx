@@ -27,6 +27,7 @@ interface Trade {
 interface TradeCardProps {
   trade: Trade;
   fragments?: Trade[];
+  portfolioName?: string | null;
 }
 
 function hasPnlValue(pnl: Trade['pnl']): boolean {
@@ -94,7 +95,7 @@ function TradeFragmentRow({ trade }: { trade: Trade }) {
   );
 }
 
-export function TradeCard({ trade, fragments = [] }: TradeCardProps) {
+export function TradeCard({ trade, fragments = [], portfolioName }: TradeCardProps) {
   const [showTimeline, setShowTimeline] = useState(false);
   const [showFragments, setShowFragments] = useState(false);
 
@@ -143,6 +144,9 @@ export function TradeCard({ trade, fragments = [] }: TradeCardProps) {
               {trade.status}
             </span>
             <TradeBadges trade={trade} />
+            {portfolioName && (
+              <span className="text-[10px] text-muted-foreground">Portfólio: {portfolioName}</span>
+            )}
           </div>
           {pnlOk ? (
             <div className={`font-mono text-base font-bold shrink-0 ${totalPnl >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>

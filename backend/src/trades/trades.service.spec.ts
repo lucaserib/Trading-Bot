@@ -96,3 +96,51 @@ describe('TradesService.getStats (exclusao de duplicatas do acumulado)', () => {
     expect(stats.unrealizedPnL).toBe(0);
   });
 });
+
+describe('TradesService (FASE 7 -- filtro por portfolioId)', () => {
+  it('getStats com portfolioId inclui o filtro no where das 3 buscas (OPEN/CLOSED/ERROR)', async () => {
+    const tradesRepository = makeRepo([]);
+    tradesRepository.find = jest.fn().mockResolvedValue([]);
+
+    const service = new TradesService(tradesRepository, makeRepo([]), { emit: jest.fn() } as any);
+    await service.getStats('portfolio-1');
+
+    const wheres = tradesRepository.find.mock.calls.map((call: any) => call[0].where);
+    expect(wheres).toEqual([
+      { status: 'OPEN', portfolioId: 'portfolio-1' },
+      { status: 'CLOSED', portfolioId: 'portfolio-1' },
+      { status: 'ERROR', portfolioId: 'portfolio-1' },
+    ]);
+  });
+
+  it('getStats sem portfolioId nao filtra (comportamento atual preservado)', async () => {
+    const tradesRepository = makeRepo([]);
+    tradesRepository.find = jest.fn().mockResolvedValue([]);
+
+    const service = new TradesService(tradesRepository, makeRepo([]), { emit: jest.fn() } as any);
+    await service.getStats();
+
+    const wheres = tradesRepository.find.mock.calls.map((call: any) => call[0].where);
+    expect(wheres).toEqual([{ status: 'OPEN' }, { status: 'CLOSED' }, { status: 'ERROR' }]);
+  });
+
+  it('findAll com portfolioId filtra por status e portfolioId juntos', async () => {
+    const tradesRepository = makeRepo([]);
+    tradesRepository.find = jest.fn().mockResolvedValue([]);
+
+    const service = new TradesService(tradesRepository, makeRepo([]), { emit: jest.fn() } as any);
+    await service.findAll('OPEN', 50, 'portfolio-1');
+
+    expect(tradesRepository.find.mock.calls[0][0].where).toEqual({ status: 'OPEN', portfolioId: 'portfolio-1' });
+  });
+
+  it('findOpenTrades com portfolioId filtra somente as posicoes daquele portfolio', async () => {
+    const tradesRepository = makeRepo([]);
+    tradesRepository.find = jest.fn().mockResolvedValue([]);
+
+    const service = new TradesService(tradesRepository, makeRepo([]), { emit: jest.fn() } as any);
+    await service.findOpenTrades('portfolio-1');
+
+    expect(tradesRepository.find.mock.calls[0][0].where).toEqual({ status: 'OPEN', portfolioId: 'portfolio-1' });
+  });
+});

@@ -2245,6 +2245,7 @@ export class WebhookService {
 
       const tradeData: Partial<Trade> = {
         strategyId: resolvedStrategy.id,
+        portfolioId: resolvedStrategy.portfolioId,
         symbol: normalizedSymbol,
         side,
         type: 'MARKET',
@@ -2330,6 +2331,7 @@ export class WebhookService {
 
        const tradeData: Partial<Trade> = {
           strategyId: resolvedStrategy.id,
+          portfolioId: resolvedStrategy.portfolioId,
           symbol: normalizedSymbol,
           side,
           type: isLimitOrder ? 'LIMIT' : 'MARKET',
@@ -2360,6 +2362,7 @@ export class WebhookService {
 
     const tradeData: Partial<Trade> = {
       strategyId: resolvedStrategy.id,
+      portfolioId: resolvedStrategy.portfolioId,
       symbol: normalizedSymbol,
       side,
       type: isLimitOrder ? 'LIMIT' : 'MARKET',

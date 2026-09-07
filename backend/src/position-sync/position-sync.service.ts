@@ -947,6 +947,7 @@ export class PositionSyncService implements OnModuleInit {
   private async importOrphanPosition(strategy: Strategy, position: NormalizedPosition): Promise<Trade> {
     const trade = this.tradesRepository.create({
       strategyId: strategy.id,
+      portfolioId: (strategy as any).portfolioId ?? null,
       symbol: position.symbol,
       side: position.side,
       type: 'MARKET',

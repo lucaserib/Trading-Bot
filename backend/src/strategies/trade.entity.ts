@@ -11,6 +11,10 @@ export class Trade {
   @Column()
   strategyId: string;
 
+  @Index()
+  @Column({ type: 'uuid', nullable: true })
+  portfolioId: string | null;
+
   @Column()
   symbol: string;
 

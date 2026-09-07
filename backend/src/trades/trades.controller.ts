@@ -34,9 +34,9 @@ export class TradesController {
   ) {}
 
   @Get()
-  async findAll(@Query('status') status?: string, @Query('limit') limit?: string) {
+  async findAll(@Query('status') status?: string, @Query('limit') limit?: string, @Query('portfolioId') portfolioId?: string) {
     try {
-      return await this.tradesService.findAll(status, limit ? parseInt(limit) : undefined);
+      return await this.tradesService.findAll(status, limit ? parseInt(limit) : undefined, portfolioId);
     } catch (error: any) {
       this.logger.error(`Failed to fetch trades: ${error.message}`);
       return [];
@@ -44,9 +44,9 @@ export class TradesController {
   }
 
   @Get('stats')
-  async getStats() {
+  async getStats(@Query('portfolioId') portfolioId?: string) {
     try {
-      return await this.tradesService.getStats();
+      return await this.tradesService.getStats(portfolioId);
     } catch (error: any) {
       this.logger.error(`Failed to fetch stats: ${error.message}`);
       return {
@@ -156,8 +156,8 @@ export class TradesController {
   }
 
   @Post('close-all')
-  async closeAllPositions() {
-    const openTrades = await this.tradesService.findOpenTrades();
+  async closeAllPositions(@Query('portfolioId') portfolioId?: string) {
+    const openTrades = await this.tradesService.findOpenTrades(portfolioId);
     const results: { closed: number; errors: string[]; alreadyClosed: number } = {
       closed: 0,
       errors: [],

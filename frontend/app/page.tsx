@@ -1,21 +1,63 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useTradesSocket } from '@/hooks/useTradesSocket';
 import { StatsCard } from '@/components/dashboard/StatsCard';
 import { Table } from '@/components/ui/Table';
 import { TradeCard } from '@/components/trades/TradeCard';
 import { groupTradesByPosition } from '@/lib/trade-grouping';
-import { closeAllPositions, pauseAllStrategies, resumeAllStrategies, closePosition } from '@/lib/api';
+import { closeAllPositions, pauseAllStrategies, resumeAllStrategies, closePosition, fetchPortfolios, fetchStats, testPortfolioConnection, Portfolio } from '@/lib/api';
 import { formatPrice, formatQuantity, formatPnL, formatPnLSummary, formatPercentSummary, formatDateUTC, formatTimeUTC } from '@/lib/formatters';
 
+const PORTFOLIO_FILTER_STORAGE_KEY = 'dashboard:selectedPortfolioId';
+
 export default function Home() {
-  const { stats, isConnected, lastUpdate, forceSync, isSyncing } = useTradesSocket();
+  const { stats: liveStats, isConnected, lastUpdate, forceSync, isSyncing } = useTradesSocket();
   const [filter, setFilter] = useState<'ALL' | 'OPEN' | 'CLOSED' | 'ERROR'>('ALL');
   const [viewMode, setViewMode] = useState<'table' | 'cards'>('cards');
   const [isClosingAll, setIsClosingAll] = useState(false);
   const [isPausingAll, setIsPausingAll] = useState(false);
   const [allPaused, setAllPaused] = useState(false);
+  const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
+  const [selectedPortfolioId, setSelectedPortfolioId] = useState<string>('');
+  const [filteredStats, setFilteredStats] = useState<typeof liveStats>(null);
+  const [balanceInfo, setBalanceInfo] = useState<{ success: boolean; balance?: number; message?: string } | null>(null);
+
+  useEffect(() => {
+    const stored = window.localStorage.getItem(PORTFOLIO_FILTER_STORAGE_KEY);
+    if (stored) setSelectedPortfolioId(stored);
+    fetchPortfolios().then(setPortfolios).catch(console.error);
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem(PORTFOLIO_FILTER_STORAGE_KEY, selectedPortfolioId);
+  }, [selectedPortfolioId]);
+
+  const loadFilteredStats = useCallback(async () => {
+    if (!selectedPortfolioId) {
+      setFilteredStats(null);
+      setBalanceInfo(null);
+      return;
+    }
+    try {
+      const data = await fetchStats(selectedPortfolioId);
+      setFilteredStats(data);
+    } catch (error) {
+      console.error(error);
+    }
+    try {
+      const balance = await testPortfolioConnection(selectedPortfolioId);
+      setBalanceInfo(balance);
+    } catch (error) {
+      setBalanceInfo(null);
+    }
+  }, [selectedPortfolioId]);
+
+  useEffect(() => { loadFilteredStats(); }, [loadFilteredStats, lastUpdate]);
+
+  const stats = selectedPortfolioId ? filteredStats : liveStats;
+  const selectedPortfolio = portfolios.find((p) => p.id === selectedPortfolioId) || null;
+  const portfolioNameById = new Map(portfolios.map((p) => [p.id, p.name]));
 
   const getPnLValue = (pnl: number | string | null | undefined): number => {
     if (!pnl) return 0;
@@ -28,12 +70,15 @@ export default function Home() {
   const winRate = stats?.winRate || 0;
 
   const handleCloseAll = async () => {
-    if (!confirm('Tem certeza que deseja fechar TODAS as posições abertas? Esta ação não pode ser desfeita.')) return;
+    const portfolioLabel = selectedPortfolio ? ` do portfólio "${selectedPortfolio.name}"` : '';
+    const count = stats?.activePositions || 0;
+    if (!confirm(`Tem certeza que deseja fechar TODAS as ${count} posições abertas${portfolioLabel}? Esta ação não pode ser desfeita.`)) return;
     setIsClosingAll(true);
     try {
-      const result = await closeAllPositions();
+      const result = await closeAllPositions(selectedPortfolioId || undefined);
       alert(`${result.closed} posições fechadas${result.errors?.length > 0 ? `. Erros: ${result.errors.join(', ')}` : ''}`);
       forceSync();
+      loadFilteredStats();
     } catch (error: unknown) {
       const msg = error instanceof Error ? error.message : 'Erro desconhecido';
       alert(`Falha ao fechar posições: ${msg}`);
@@ -43,13 +88,15 @@ export default function Home() {
   };
 
   const handlePauseAll = async () => {
+    const portfolioLabel = selectedPortfolio ? ` do portfólio "${selectedPortfolio.name}"` : '';
+    if (!confirm(`Tem certeza que deseja ${allPaused ? 'retomar' : 'pausar'} todas as estratégias${portfolioLabel}?`)) return;
     setIsPausingAll(true);
     try {
       if (allPaused) {
-        await resumeAllStrategies();
+        await resumeAllStrategies(selectedPortfolioId || undefined);
         setAllPaused(false);
       } else {
-        await pauseAllStrategies();
+        await pauseAllStrategies(selectedPortfolioId || undefined);
         setAllPaused(true);
       }
       forceSync();
@@ -92,6 +139,16 @@ export default function Home() {
           <p className="text-xs text-muted-foreground mt-0.5">Visão geral do sistema de trading</p>
         </div>
         <div className="flex items-center gap-3">
+          <select
+            value={selectedPortfolioId}
+            onChange={(e) => setSelectedPortfolioId(e.target.value)}
+            className="bg-secondary/80 border border-border/60 rounded-md px-2.5 py-1.5 text-xs text-foreground focus:border-primary/50 outline-none transition"
+          >
+            <option value="">Portfólio: Todos os portfólios</option>
+            {portfolios.map((p) => (
+              <option key={p.id} value={p.id}>{p.name} · {p.exchange.toUpperCase()} · {p.mode}</option>
+            ))}
+          </select>
           <div className="flex items-center gap-2">
             <div className={`w-2 h-2 rounded-full ${isConnected ? 'bg-emerald-500 pulse-dot' : 'bg-red-500'}`} />
             <span className="text-xs text-muted-foreground">
@@ -154,6 +211,28 @@ export default function Home() {
           </div>
         </div>
       </div>
+
+      {selectedPortfolio && (
+        <div className={`glass-card rounded-lg p-3 border ${selectedPortfolio.mode === 'DEMO' ? 'border-violet-500/20' : 'border-red-500/20'}`}>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="text-xs font-semibold text-foreground">Saldo — {selectedPortfolio.name}</span>
+              <span className={`px-2 py-0.5 rounded text-[10px] font-bold border ${
+                selectedPortfolio.mode === 'DEMO'
+                  ? 'bg-violet-500/15 text-violet-400 border-violet-500/30'
+                  : 'bg-red-500/15 text-red-400 border-red-500/30'
+              }`}>
+                {selectedPortfolio.mode}
+              </span>
+            </div>
+            {balanceInfo && (
+              <span className={`text-sm font-mono font-bold ${balanceInfo.success ? 'text-foreground' : 'text-red-400'}`}>
+                {balanceInfo.success ? `${balanceInfo.balance?.toFixed(2) ?? '0.00'} USDT` : balanceInfo.message}
+              </span>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
         <StatsCard
@@ -237,6 +316,12 @@ export default function Home() {
                   },
                 },
                 {
+                  header: 'Portfólio',
+                  accessor: (item: any) => (
+                    <span className="text-muted-foreground text-xs">{portfolioNameById.get(item.portfolioId) || 'Sem portfólio'}</span>
+                  ),
+                },
+                {
                   header: 'Abertura',
                   accessor: (item) => (
                     <div className="text-xs">
@@ -270,7 +355,7 @@ export default function Home() {
           </h3>
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
             {stats.errorTrades.slice(0, 6).map((trade: any) => (
-              <TradeCard key={trade.id} trade={trade} />
+              <TradeCard key={trade.id} trade={trade} portfolioName={portfolioNameById.get(trade.portfolioId)} />
             ))}
           </div>
         </div>
@@ -323,7 +408,7 @@ export default function Home() {
         {viewMode === 'cards' ? (
           <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
             {groupedTrades.map(({ primary, fragments }) => (
-              <TradeCard key={primary.id} trade={primary} fragments={fragments} />
+              <TradeCard key={primary.id} trade={primary} fragments={fragments} portfolioName={portfolioNameById.get((primary as any).portfolioId)} />
             ))}
           </div>
         ) : (

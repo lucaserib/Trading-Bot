@@ -247,10 +247,11 @@ ${visualization}
   }
 
   @Post('pause-all')
-  async pauseAllTrading() {
+  async pauseAllTrading(@Query('portfolioId') portfolioId?: string) {
     const strategies = await this.strategiesService.findAll();
     let paused = 0;
     for (const strategy of strategies) {
+      if (portfolioId && strategy.portfolioId !== portfolioId) continue;
       if (strategy.isActive && !strategy.pauseNewOrders) {
         await this.strategiesService.update(strategy.id, { pauseNewOrders: true });
         paused++;
@@ -260,10 +261,11 @@ ${visualization}
   }
 
   @Post('resume-all')
-  async resumeAllTrading() {
+  async resumeAllTrading(@Query('portfolioId') portfolioId?: string) {
     const strategies = await this.strategiesService.findAll();
     let resumed = 0;
     for (const strategy of strategies) {
+      if (portfolioId && strategy.portfolioId !== portfolioId) continue;
       if (strategy.isActive && strategy.pauseNewOrders) {
         await this.strategiesService.update(strategy.id, { pauseNewOrders: false });
         resumed++;

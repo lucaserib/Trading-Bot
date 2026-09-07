@@ -24,11 +24,14 @@ export class TradesService {
     return normalized;
   }
 
-  async findAll(status?: string, limit: number = 50): Promise<any[]> {
+  async findAll(status?: string, limit: number = 50, portfolioId?: string): Promise<any[]> {
     const where: any = {};
 
     if (status && ['OPEN', 'CLOSED', 'ERROR'].includes(status.toUpperCase())) {
       where.status = status.toUpperCase();
+    }
+    if (portfolioId) {
+      where.portfolioId = portfolioId;
     }
 
     const trades = await this.tradesRepository.find({
@@ -40,9 +43,13 @@ export class TradesService {
     return trades.map(this.normalizeTrade);
   }
 
-  async findOpenTrades(): Promise<any[]> {
+  async findOpenTrades(portfolioId?: string): Promise<any[]> {
+    const where: any = { status: 'OPEN' };
+    if (portfolioId) {
+      where.portfolioId = portfolioId;
+    }
     const trades = await this.tradesRepository.find({
-      where: { status: 'OPEN' },
+      where,
       order: { timestamp: 'DESC' }
     });
     return trades.map(this.normalizeTrade);
@@ -133,19 +140,19 @@ export class TradesService {
     return null;
   }
 
-  async getStats() {
+  async getStats(portfolioId?: string) {
     try {
       const [openTrades, closedTrades, errorTrades] = await Promise.all([
         this.tradesRepository.find({
-          where: { status: 'OPEN' },
+          where: portfolioId ? { status: 'OPEN', portfolioId } : { status: 'OPEN' },
           order: { timestamp: 'DESC' }
         }),
         this.tradesRepository.find({
-          where: { status: 'CLOSED' },
+          where: portfolioId ? { status: 'CLOSED', portfolioId } : { status: 'CLOSED' },
           order: { timestamp: 'DESC' }
         }),
         this.tradesRepository.find({
-          where: { status: 'ERROR' },
+          where: portfolioId ? { status: 'ERROR', portfolioId } : { status: 'ERROR' },
           order: { timestamp: 'DESC' },
           take: 50
         })
