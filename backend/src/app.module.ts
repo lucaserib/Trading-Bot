@@ -21,6 +21,7 @@ import { AiChatModule } from './ai-chat/ai-chat.module';
 import { ValidationReportsModule } from './validation-reports/validation-reports.module';
 import { PortfoliosModule } from './portfolios/portfolios.module';
 import { CommonModule } from './common/common.module';
+import { PerformanceModule } from './performance/performance.module';
 
 @Module({
   imports: [
@@ -75,6 +76,7 @@ import { CommonModule } from './common/common.module';
     ValidationReportsModule,
     PortfoliosModule,
     CommonModule,
+    PerformanceModule,
   ],
   controllers: [AppController],
   providers: [
