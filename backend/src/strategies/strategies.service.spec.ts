@@ -164,4 +164,21 @@ describe('StrategiesService (FASE 2 -- CredentialsResolver)', () => {
     expect(result[0].portfolio).toEqual({ id: 'p1', name: 'Bybit Demo', exchange: 'bybit', mode: 'DEMO' });
     expect(result[1].portfolio).toBeNull();
   });
+
+  it('GET /strategies devolve portfolioId e um objeto portfolio com exatamente as chaves esperadas pela UI', async () => {
+    const strategies = [
+      { id: 's1', name: 'A', portfolioId: 'p1' },
+    ] as unknown as Strategy[];
+    (strategiesRepository as any).find = jest.fn().mockResolvedValue(strategies);
+    portfoliosService.findSummariesByIds.mockResolvedValue(
+      new Map([['p1', { id: 'p1', name: 'teste', exchange: 'bybit', mode: 'DEMO' }]]),
+    );
+
+    const result = await service.findAll();
+
+    expect(result[0]).toHaveProperty('portfolioId', 'p1');
+    expect(Object.keys(result[0].portfolio!).sort()).toEqual(['exchange', 'id', 'mode', 'name'].sort());
+    expect(result[0]).not.toHaveProperty('apiKey');
+    expect(result[0]).not.toHaveProperty('apiSecret');
+  });
 });

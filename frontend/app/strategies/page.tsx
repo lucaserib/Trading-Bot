@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useEffect } from 'react';
-import { fetchStrategies, createStrategy, updateStrategy, deleteStrategy, pauseStrategy, resumeStrategy, resetSingleMode } from '@/lib/api';
+import { fetchStrategies, createStrategy, updateStrategy, deleteStrategy, pauseStrategy, resumeStrategy, resetSingleMode, fetchPortfolios, Portfolio } from '@/lib/api';
 
 const DEFAULT_FORM_DATA = {
   name: 'New Strategy',
+  portfolioId: '',
   asset: 'BTCUSDT',
   exchange: 'binance',
   direction: 'LONG',
@@ -26,7 +27,6 @@ const DEFAULT_FORM_DATA = {
   bufferEntry: false,
   bufferPercentage: 0.2,
   timeframe: '',
-  bufferExpiryCandles: 1,
   useAccountPercentage: false,
   accountPercentage: 10,
   takeProfitQuantity1: 33,
@@ -39,14 +39,28 @@ const DEFAULT_FORM_DATA = {
   hedgeMode: false,
 };
 
+function formatPortfolioOption(p: Portfolio): string {
+  return `${p.name} · ${p.exchange.toUpperCase()} · ${p.mode}`;
+}
+
 export default function StrategiesPage() {
   const [strategies, setStrategies] = useState<any[]>([]);
+  const [portfolios, setPortfolios] = useState<Portfolio[]>([]);
   const [loading, setLoading] = useState(true);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [formData, setFormData] = useState(DEFAULT_FORM_DATA);
   const [isSaving, setIsSaving] = useState(false);
 
-  useEffect(() => { loadStrategies(); }, []);
+  useEffect(() => { loadStrategies(); loadPortfolios(); }, []);
+
+  async function loadPortfolios() {
+    try {
+      const data = await fetchPortfolios();
+      setPortfolios(data);
+    } catch (error) {
+      console.error(error);
+    }
+  }
 
   async function loadStrategies() {
     try {
@@ -63,6 +77,7 @@ export default function StrategiesPage() {
     setEditingId(strategy.id);
     setFormData({
       name: strategy.name,
+      portfolioId: strategy.portfolioId || '',
       asset: strategy.asset,
       exchange: strategy.exchange || 'binance',
       direction: strategy.direction,
@@ -84,7 +99,6 @@ export default function StrategiesPage() {
       bufferEntry: strategy.bufferEntry || false,
       bufferPercentage: strategy.bufferPercentage || 0.2,
       timeframe: strategy.timeframe || '',
-      bufferExpiryCandles: strategy.bufferExpiryCandles ?? 1,
       useAccountPercentage: strategy.useAccountPercentage || false,
       accountPercentage: strategy.accountPercentage || 10,
       takeProfitQuantity1: strategy.takeProfitQuantity1 || 33,
@@ -117,10 +131,17 @@ export default function StrategiesPage() {
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
+
+    if (!editingId && portfolios.length > 0 && !formData.portfolioId) {
+      alert('Selecione um portfólio para a nova estratégia.');
+      return;
+    }
+
     setIsSaving(true);
 
     const payload: any = {
       name: formData.name,
+      portfolioId: formData.portfolioId || null,
       asset: formData.asset,
       exchange: formData.exchange,
       direction: formData.direction,
@@ -141,7 +162,6 @@ export default function StrategiesPage() {
       bufferEntry: formData.bufferEntry,
       bufferPercentage: formData.bufferEntry ? Number(formData.bufferPercentage) : null,
       timeframe: formData.bufferEntry && formData.timeframe ? formData.timeframe : null,
-      bufferExpiryCandles: formData.bufferEntry ? Number(formData.bufferExpiryCandles) || 1 : 1,
       useAccountPercentage: formData.useAccountPercentage,
       accountPercentage: formData.useAccountPercentage ? Number(formData.accountPercentage) : null,
       takeProfitQuantity1: Number(formData.takeProfitQuantity1),
@@ -261,10 +281,17 @@ export default function StrategiesPage() {
                   >
                     <div className="flex justify-between items-start mb-2.5">
                       <div>
-                        <h4 className="text-foreground font-bold text-sm">{s.name}</h4>
+                        <div className="flex items-center gap-1.5">
+                          <h4 className="text-foreground font-bold text-sm">{s.name}</h4>
+                          {s.portfolio && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded font-medium bg-primary/10 text-primary border border-primary/20">
+                              {s.portfolio.name}
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-2 mt-0.5">
                           <span className="text-muted-foreground font-mono text-xs">{s.asset}</span>
-                          <span className="text-[10px] px-1.5 py-0.5 bg-secondary rounded text-muted-foreground uppercase">{s.exchange || 'binance'}</span>
+                          <span className="text-[10px] px-1.5 py-0.5 bg-secondary rounded text-muted-foreground uppercase">{s.portfolio?.exchange || s.exchange || 'binance'}</span>
                         </div>
                       </div>
                       <div className="flex flex-col items-end gap-1">
@@ -370,18 +397,33 @@ export default function StrategiesPage() {
               <input name="name" className={inputClass} value={formData.name} onChange={handleChange} />
             </div>
 
+            <div className="space-y-1">
+              <label className={labelClass}>Portfólio</label>
+              <select name="portfolioId" className={selectClass} value={formData.portfolioId} onChange={handleChange}>
+                <option value="">Selecione um portfólio</option>
+                {portfolios.map((p) => (
+                  <option key={p.id} value={p.id}>{formatPortfolioOption(p)}</option>
+                ))}
+              </select>
+              {!editingId && portfolios.length === 0 && (
+                <p className="text-[9px] text-muted-foreground/60">Nenhum portfólio cadastrado — cadastre um em Portfólios ou preencha as chaves manualmente abaixo.</p>
+              )}
+            </div>
+
             <div className="grid grid-cols-3 gap-3">
               <div className="space-y-1">
                 <label className={labelClass}>Ativo</label>
                 <input name="asset" className={inputClass} value={formData.asset} onChange={handleChange} />
               </div>
-              <div className="space-y-1">
-                <label className={labelClass}>Exchange</label>
-                <select name="exchange" className={selectClass} value={formData.exchange} onChange={handleChange}>
-                  <option value="binance">Binance</option>
-                  <option value="bybit">Bybit</option>
-                </select>
-              </div>
+              {!formData.portfolioId && (
+                <div className="space-y-1">
+                  <label className={labelClass}>Exchange</label>
+                  <select name="exchange" className={selectClass} value={formData.exchange} onChange={handleChange}>
+                    <option value="binance">Binance</option>
+                    <option value="bybit">Bybit</option>
+                  </select>
+                </div>
+              )}
               <div className="space-y-1">
                 <label className={labelClass}>Direção</label>
                 <select name="direction" className={selectClass} value={formData.direction} onChange={handleChange}>
@@ -433,8 +475,6 @@ export default function StrategiesPage() {
                         <option value="4h">4h</option>
                         <option value="1d">1d</option>
                       </select>
-                      <label className="text-[10px] text-accent">Validade da ordem com buffer (candles)</label>
-                      <input type="number" min="1" step="1" name="bufferExpiryCandles" className={inputClass} value={formData.bufferExpiryCandles} onChange={handleChange} />
                       <p className="text-[9px] text-muted-foreground/60">Sem timeframe, a ordem expira em 5 minutos.</p>
                     </div>
                   )}
@@ -492,24 +532,26 @@ export default function StrategiesPage() {
               </div>
             </Section>
 
-            <Section title={`Exchange Keys (${formData.exchange === 'bybit' ? 'Bybit' : 'Binance'})`}>
-              {editingId && (
-                <p className="text-[10px] text-muted-foreground mb-2">Preencha apenas se quiser ATUALIZAR as chaves.</p>
-              )}
-              <div className="space-y-2">
-                <input name="apiKey" placeholder={editingId ? 'Update API Key (Opcional)' : 'API Key'} className={inputClass} value={formData.apiKey} onChange={handleChange} />
-                <input type="password" name="apiSecret" placeholder={editingId ? 'Update API Secret (Opcional)' : 'API Secret'} className={inputClass} value={formData.apiSecret} onChange={handleChange} />
-              </div>
-              <div className="flex flex-col gap-2 mt-3">
-                <Checkbox name="isTestnet" checked={formData.isTestnet} onChange={handleChange} label="Usar Testnet" color="accent-blue-500" />
-                <Checkbox name="isRealAccount" checked={formData.isRealAccount} onChange={handleChange} disabled={formData.isTestnet} label="Habilitar Conta Real" color="accent-emerald-500" />
-                {!formData.isTestnet && !formData.isRealAccount && (
-                  <p className="text-[10px] text-red-400 ml-6 font-semibold">
-                    Ative Testnet OU Conta Real. Ordens serão BLOQUEADAS sem uma dessas opções.
-                  </p>
+            {!formData.portfolioId && (
+              <Section title={`Exchange Keys (${formData.exchange === 'bybit' ? 'Bybit' : 'Binance'})`}>
+                {editingId && (
+                  <p className="text-[10px] text-muted-foreground mb-2">Preencha apenas se quiser ATUALIZAR as chaves.</p>
                 )}
-              </div>
-            </Section>
+                <div className="space-y-2">
+                  <input name="apiKey" placeholder={editingId ? 'Update API Key (Opcional)' : 'API Key'} className={inputClass} value={formData.apiKey} onChange={handleChange} />
+                  <input type="password" name="apiSecret" placeholder={editingId ? 'Update API Secret (Opcional)' : 'API Secret'} className={inputClass} value={formData.apiSecret} onChange={handleChange} />
+                </div>
+                <div className="flex flex-col gap-2 mt-3">
+                  <Checkbox name="isTestnet" checked={formData.isTestnet} onChange={handleChange} label="Usar Testnet" color="accent-blue-500" />
+                  <Checkbox name="isRealAccount" checked={formData.isRealAccount} onChange={handleChange} disabled={formData.isTestnet} label="Habilitar Conta Real" color="accent-emerald-500" />
+                  {!formData.isTestnet && !formData.isRealAccount && (
+                    <p className="text-[10px] text-red-400 ml-6 font-semibold">
+                      Ative Testnet OU Conta Real. Ordens serão BLOQUEADAS sem uma dessas opções.
+                    </p>
+                  )}
+                </div>
+              </Section>
+            )}
 
             <Section title="Gerenciamento de Risco">
               <div className="grid grid-cols-2 gap-3 mb-3">
